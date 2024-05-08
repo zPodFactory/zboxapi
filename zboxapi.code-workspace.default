@@ -1,0 +1,43 @@
+{
+    "folders": [
+        {
+            "path": ".",
+            "name": "Root",
+        },
+    ],
+    "settings": {
+        "python.analysis.extraPaths": [
+            "./src", // Allow vscode to see zboxapi modules
+        ],
+        "[python]": {
+            "editor.defaultFormatter": "charliermarsh.ruff",
+            "editor.formatOnSave": true,
+            "editor.codeActionsOnSave": {
+                "source.organizeImports": "explicit"
+            }
+        },
+        "python.languageServer": "Pylance",
+        "files.exclude": {
+            "**/.DS_Store": true,
+            "**/.git": true,
+            "**/.hg": true,
+            "**/.svn": true,
+            "**/CVS": true,
+            "**/__pycache__": true,
+            "**/Thumbs.db": true,
+            "**/.venv": true,
+        },
+    },
+    "extensions": {
+        "recommendations": [
+            "charliermarsh.ruff",
+            "ms-python.python",
+            "ms-python.vscode-pylance",
+            "ms-vscode-remote.remote-ssh",
+            "ms-vscode-remote.vscode-remote-extensionpack",
+            "ms-vscode.remote-explorer",
+            "skellock.just",
+            "sourcery.sourcery",
+        ]
+    }
+}
