@@ -10,7 +10,7 @@ zboxapi = "zboxapi.main:launch"
 
 [tool.poetry.dependencies]
 fastapi = "0.111.0"
-python = ">=3.12"
+python = ">=3.10"
 uvicorn = "0.29.0"
 ipython = "^8.24.0"
 
@@ -41,4 +41,3 @@ files = [
 ]
 search = '__version__ = "{current_version}"'
 replace = '__version__ = "{new_version}"'
-
