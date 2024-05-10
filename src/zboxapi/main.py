@@ -1,5 +1,6 @@
 import contextlib
 import fcntl
+import os
 import re
 import socket
 
@@ -241,7 +242,13 @@ def delete_hosts(lines_in: list[DnsDelete] | DnsDelete) -> list[DnsView]:
     return hosts_lines
 
 
-app = FastAPI(title="zPod zBox API", dependencies=[Depends(validate_api_key)])
+zboxapi_root_path = os.getenv("ZBOXAPI_ROOT_PATH", "/")
+
+app = FastAPI(
+    title="zBox API",
+    root_path=zboxapi_root_path,
+    dependencies=[Depends(validate_api_key)],
+)
 app.include_router(hosts_router)
 ZPOD_PASSWORD = get_zpod_password()
 
