@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+#Environment="ZBOXAPI_ROOT_PATH=/zboxapi"
 ExecStart=/root/.local/bin/zboxapi
 Restart=always
 RestartSec=3
