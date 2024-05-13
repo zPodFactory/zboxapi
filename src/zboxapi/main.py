@@ -13,6 +13,7 @@ from typing import IO, Annotated
 
 import uvicorn
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Security, status
+from fastapi.routing import APIRoute
 from fastapi.security.api_key import APIKey, APIKeyHeader
 from pydantic import AfterValidator, BaseModel
 from pydantic_core import PydanticCustomError
@@ -106,6 +107,17 @@ def sort_hosts_lines(item: dict):
         socket.inet_aton(str(item["ip"])),
         item["fqdn"],
     )
+
+
+def simplify_operation_ids(api: FastAPI) -> None:
+    """
+    Update operation IDs so that generated API clients have simpler function
+    names.
+    """
+    for route in api.routes:
+        if isinstance(route, APIRoute) and not route.operation_id:
+            tag = route.tags[0] if route.tags else "default"
+            route.operation_id = f"{tag}_{route.name}"
 
 
 def make_list(obj):
@@ -250,6 +262,8 @@ app = FastAPI(
     dependencies=[Depends(validate_api_key)],
 )
 app.include_router(hosts_router)
+simplify_operation_ids(app)
+
 ZPOD_PASSWORD = get_zpod_password()
 
 
