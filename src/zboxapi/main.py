@@ -270,7 +270,7 @@ ZPOD_PASSWORD = get_zpod_password()
 def launch():
     uvicorn.run(
         app,
-        host="zbox",
+        host="127.0.0.1",
         port=8000,
     )
 
