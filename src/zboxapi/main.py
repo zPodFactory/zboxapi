@@ -254,7 +254,7 @@ def delete_hosts(lines_in: list[DnsDelete] | DnsDelete) -> list[DnsView]:
     return hosts_lines
 
 
-zboxapi_root_path = os.getenv("ZBOXAPI_ROOT_PATH", "/")
+zboxapi_root_path = os.getenv("ZBOXAPI_ROOT_PATH", None)
 
 app = FastAPI(
     title="zBox API",
