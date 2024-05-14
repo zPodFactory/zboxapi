@@ -33,7 +33,7 @@ zboxapi-release version:
   poetry version {{version}}
   newversion=$(poetry version -s)
 
-    # Commit changes
+  # Commit changes
   git commit -am"Version v${newversion}"
   git push
 
