@@ -176,24 +176,24 @@ def validate_fqdn(value: str):
 FQDN = Annotated[str, AfterValidator(validate_fqdn)]
 
 
-class DnsCreate(BaseModel):
+class HostsCreate(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
 
 
-class DnsDelete(BaseModel):
+class HostsDelete(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
 
 
-class DnsUpdate(BaseModel):
+class HostsUpdate(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
     new_ip: IPv4Address
     new_fqdn: FQDN
 
 
-class DnsView(BaseModel):
+class HostsView(BaseModel):
     ip: IPv4Address
     fqdn: str
 
@@ -205,7 +205,7 @@ hosts_router = APIRouter(prefix="/hosts", tags=["hosts"])
 def get_hosts(
     ip: IPv4Address | None = None,
     fqdn: str | None = None,
-) -> list[DnsView]:
+) -> list[HostsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
         hosts_lines = filter_hosts_file(hosts_lines, ip, fqdn)
@@ -213,7 +213,7 @@ def get_hosts(
 
 
 @hosts_router.post("")
-def add_hosts(lines_in: list[DnsCreate] | DnsCreate) -> list[DnsView]:
+def add_hosts(lines_in: list[HostsCreate] | HostsCreate) -> list[HostsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
         for line in make_list(lines_in):
@@ -226,7 +226,7 @@ def add_hosts(lines_in: list[DnsCreate] | DnsCreate) -> list[DnsView]:
 
 
 @hosts_router.put("")
-def update_hosts(lines_in: list[DnsUpdate] | DnsUpdate) -> list[DnsView]:
+def update_hosts(lines_in: list[HostsUpdate] | HostsUpdate) -> list[HostsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
         for line in make_list(lines_in):
@@ -241,7 +241,7 @@ def update_hosts(lines_in: list[DnsUpdate] | DnsUpdate) -> list[DnsView]:
 
 
 @hosts_router.delete("")
-def delete_hosts(lines_in: list[DnsDelete] | DnsDelete) -> list[DnsView]:
+def delete_hosts(lines_in: list[HostsDelete] | HostsDelete) -> list[HostsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
         for line in make_list(lines_in):
