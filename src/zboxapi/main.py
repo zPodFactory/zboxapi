@@ -3,8 +3,6 @@ import fcntl
 import os
 import re
 import socket
-
-# import ssl
 import subprocess
 import time
 from ipaddress import IPv4Address
@@ -17,6 +15,8 @@ from fastapi.routing import APIRoute
 from fastapi.security.api_key import APIKey, APIKeyHeader
 from pydantic import AfterValidator, BaseModel
 from pydantic_core import PydanticCustomError
+
+from zboxapi import __version__
 
 api_key_header = APIKeyHeader(name="access_token", auto_error=False)
 
@@ -120,29 +120,17 @@ def simplify_operation_ids(api: FastAPI) -> None:
             route.operation_id = f"{tag}_{route.name}"
 
 
-def make_list(obj):
-    return obj if isinstance(obj, list) else [obj]
-
-
-def ip_fqdn_str(obj, ip_key="ip", fqdn_key="fqdn"):
-    return f"ip={getattr(obj, ip_key)}, fqdn={getattr(obj, fqdn_key)}"
-
-
-def ip_fqdn_dict(obj, ip_key="ip", fqdn_key="fqdn"):
-    return {"ip": getattr(obj, ip_key), "fqdn": getattr(obj, fqdn_key)}
-
-
-def RecordNotFound(obj, ip_key="ip", fqdn_key="fqdn"):
+def RecordNotFound(ip, fqdn):
     return HTTPException(
-        status_code=status.HTTP_406_NOT_ACCEPTABLE,
-        detail=f"Record not found: {ip_fqdn_str(obj, ip_key, fqdn_key)}",
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"DNS record not found: ip={ip}, fqdn={fqdn}",
     )
 
 
-def RecordAlreadyPresent(obj, ip_key="ip", fqdn_key="fqdn"):
+def RecordAlreadyPresent(ip, fqdn):
     return HTTPException(
         status_code=status.HTTP_406_NOT_ACCEPTABLE,
-        detail=f"Record already present: {ip_fqdn_str(obj, ip_key, fqdn_key)}",
+        detail=f"DNS record already present: ip={ip}, fqdn={fqdn}",
     )
 
 
@@ -176,79 +164,92 @@ def validate_fqdn(value: str):
 FQDN = Annotated[str, AfterValidator(validate_fqdn)]
 
 
-class HostsCreate(BaseModel):
+class DnsCreate(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
 
 
-class HostsDelete(BaseModel):
+class DnsDelete(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
 
 
-class HostsUpdate(BaseModel):
+class DnsUpdate(BaseModel):
     ip: IPv4Address
     fqdn: FQDN
-    new_ip: IPv4Address
-    new_fqdn: FQDN
 
 
-class HostsView(BaseModel):
+class DnsView(BaseModel):
     ip: IPv4Address
     fqdn: str
 
 
-hosts_router = APIRouter(prefix="/hosts", tags=["hosts"])
+dns_router = APIRouter(prefix="/dns", tags=["dns"])
 
 
-@hosts_router.get("")
-def get_hosts(
-    ip: IPv4Address | None = None,
-    fqdn: str | None = None,
-) -> list[HostsView]:
+@dns_router.get("")
+def dns_get_all() -> list[DnsView]:
+    with get_hosts_file_object() as hosts_fo:
+        hosts_lines = get_hosts_lines(hosts_fo)
+    return hosts_lines
+
+
+@dns_router.get("/{ip}/{fqdn}")
+def dns_get(
+    ip: IPv4Address,
+    fqdn: FQDN,
+) -> DnsView:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
         hosts_lines = filter_hosts_file(hosts_lines, ip, fqdn)
-    return hosts_lines
+    if not hosts_lines:
+        raise RecordNotFound(ip, fqdn)
+    return hosts_lines[0]
 
 
-@hosts_router.post("")
-def add_hosts(lines_in: list[HostsCreate] | HostsCreate) -> list[HostsView]:
+@dns_router.post("")
+def dns_add(
+    dns_in: DnsCreate,
+) -> list[DnsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
-        for line in make_list(lines_in):
-            if filter_hosts_file(hosts_lines, line.ip, line.fqdn):
-                raise RecordAlreadyPresent(line)
-            hosts_lines.append(ip_fqdn_dict(line))
+        if filter_hosts_file(hosts_lines, dns_in.ip, dns_in.fqdn):
+            raise RecordAlreadyPresent(dns_in.ip, dns_in.fqdn)
+        hosts_lines.append({"ip": dns_in.ip, "fqdn": dns_in.fqdn})
         write_hosts_file(hosts_fo, hosts_lines)
     dnsmasq_sighup()
     return hosts_lines
 
 
-@hosts_router.put("")
-def update_hosts(lines_in: list[HostsUpdate] | HostsUpdate) -> list[HostsView]:
+@dns_router.put("/{ip}/{fqdn}")
+def dns_update(
+    ip: IPv4Address,
+    fqdn: FQDN,
+    dns_in: DnsUpdate,
+) -> list[DnsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
-        for line in make_list(lines_in):
-            key = ip_fqdn_dict(line)
-            if key not in hosts_lines:
-                raise RecordNotFound(line)
-            ix = hosts_lines.index(key)
-            hosts_lines[ix] = ip_fqdn_dict(line, "new_ip", "new_fqdn")
+        key = {"ip": ip, "fqdn": fqdn}
+        if key not in hosts_lines:
+            raise RecordNotFound(ip, fqdn)
+        ix = hosts_lines.index(key)
+        hosts_lines[ix] = {"ip": dns_in.ip, "fqdn": dns_in.fqdn}
         write_hosts_file(hosts_fo, hosts_lines)
     dnsmasq_sighup()
     return hosts_lines
 
 
-@hosts_router.delete("")
-def delete_hosts(lines_in: list[HostsDelete] | HostsDelete) -> list[HostsView]:
+@dns_router.delete("/{ip}/{fqdn}")
+def dns_delete(
+    ip: IPv4Address,
+    fqdn: FQDN,
+) -> list[DnsView]:
     with get_hosts_file_object() as hosts_fo:
         hosts_lines = get_hosts_lines(hosts_fo)
-        for line in make_list(lines_in):
-            key = ip_fqdn_dict(line)
-            if key not in hosts_lines:
-                raise RecordNotFound(line)
-            hosts_lines.remove(key)
+        key = {"ip": ip, "fqdn": fqdn}
+        if key not in hosts_lines:
+            raise RecordNotFound(ip, fqdn)
+        hosts_lines.remove(key)
         write_hosts_file(hosts_fo, hosts_lines)
     dnsmasq_sighup()
     return hosts_lines
@@ -260,8 +261,9 @@ app = FastAPI(
     title="zBox API",
     root_path=zboxapi_root_path,
     dependencies=[Depends(validate_api_key)],
+    version=__version__,
 )
-app.include_router(hosts_router)
+app.include_router(dns_router)
 simplify_operation_ids(app)
 
 ZPOD_PASSWORD = get_zpod_password()
