@@ -1,0 +1,12 @@
+[DEFAULT]
+# Base interface name for VLAN management
+interface = eth1
+
+# MTU setting for VLAN interfaces
+mtu = 1700
+
+# System default VLANs that cannot be modified (comma-separated)
+system_vlans_default = 10,20,30
+
+# System zPod VLANs that cannot be modified (comma-separated)
+system_vlans_zpod = 64,128,192
