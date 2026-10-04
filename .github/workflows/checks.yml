@@ -24,17 +24,13 @@ jobs:
 
   tests:
     # The suite fakes /etc/hosts, /etc/zboxapi.conf, interfaces.d and every system command,
-    # so it runs on a plain runner. One job per supported Python, oldest and newest included.
+    # so it runs on a plain runner. Python 3.14 only: the zbox installs are controlled.
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.10", "3.12", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.2.0
         with:
-          python-version: ${{ matrix.python }}
+          python-version: "3.14"
       - run: uv sync --locked
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests

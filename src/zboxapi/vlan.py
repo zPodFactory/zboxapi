@@ -50,7 +50,7 @@ def get_config_value(
     """Get configuration value with optional default"""
     try:
         return config.get(section, key)
-    except (configparser.NoSectionError, configparser.NoOptionError):
+    except configparser.NoSectionError, configparser.NoOptionError:
         if default is not None:
             return default
         raise ConfigError(f"Configuration missing: [{section}] {key}") from None

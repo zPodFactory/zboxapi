@@ -20,6 +20,17 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+### Fixed
+- **PyPI project page links.** The README now uses absolute GitHub URLs, so the links to
+  `DOC_DNS.md`, `DOC_VLAN.md`, the changelog and the release guide work on pypi.org instead
+  of resolving to pages under the PyPI project; `[project.urls]` adds Homepage, Repository,
+  Changelog, Documentation and Issues to the PyPI sidebar.
+
+### Changed
+- **Python 3.14 only.** `requires-python` is `>=3.14`; older interpreters are no longer
+  supported or tested, since every zbox install is controlled. Install with
+  `uv tool install zboxapi`, which fetches a managed 3.14 where the system Python is older.
+
 ## [0.1.0] — 2026-10-04
 
 ### Added

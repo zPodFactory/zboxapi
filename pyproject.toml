@@ -4,17 +4,13 @@ version = "0.1.0"
 description = "zPodFactory zBox API: DNS and VLAN management for the zbox VM"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 authors = [
     { name = "Kelby Valenti", email = "kelby.valenti@gmail.com" },
     { name = "Timo Sugliani", email = "timo.sugliani@gmail.com" },
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Framework :: FastAPI",
     "Operating System :: POSIX :: Linux",
@@ -24,6 +20,13 @@ dependencies = [
     "pydantic>=2.12",
     "uvicorn>=0.37",
 ]
+
+[project.urls]
+Homepage = "https://github.com/zPodFactory/zboxapi"
+Repository = "https://github.com/zPodFactory/zboxapi"
+Changelog = "https://github.com/zPodFactory/zboxapi/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/zPodFactory/zboxapi#readme"
+Issues = "https://github.com/zPodFactory/zboxapi/issues"
 
 [project.scripts]
 zboxapi = "zboxapi.main:launch"
@@ -52,7 +55,7 @@ addopts = "-ra"
 source = ["zboxapi"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py314"
 line-length = 88
 
 [tool.ruff.lint]

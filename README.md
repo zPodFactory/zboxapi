@@ -11,31 +11,24 @@ zPodFactory zBox Api
 
 Complete the following steps to set up zBox Api:
 
-1. Install pipx
+1. Install uv
 
     ```bash
-    # Install and configure pipx
-    apt update
-    apt install -y pipx
-    pipx ensurepath
+    curl -LsSf https://astral.sh/uv/install.sh | sh
 
-    # Reload your profile
+    # Reload your profile so ~/.local/bin is on the PATH
     source ~/.zshrc
     ```
 
 1. Install zBoxApi:
 
     ```bash
-    pipx install zboxapi
-    ```
-
-    Or with [uv](https://docs.astral.sh/uv/), which also fetches a suitable Python if needed:
-
-    ```bash
     uv tool install zboxapi
     ```
 
-    zBoxApi supports Python 3.10 through 3.14.
+    zBoxApi requires **Python 3.14**. Debian ships an older interpreter, so install with
+    [uv](https://docs.astral.sh/uv/), which downloads a managed Python 3.14 on its own. `pipx
+    install zboxapi` only works where a 3.14 interpreter is already on the PATH.
 
 1. Set up and start zboxapi.service
 
@@ -69,7 +62,7 @@ system_vlans_default = 10,20,30
 system_vlans_zpod = 64,128,192
 ```
 
-See [DOC_VLAN.md](DOC_VLAN.md) for detailed documentation on VLAN management features.
+See [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md) for detailed documentation on VLAN management features.
 
 ## API Usage
 
@@ -99,7 +92,7 @@ curl -X GET "http://127.0.0.1:8000/dns" \
      -H "access_token: your_zpod_password"
 ```
 
-For complete DNS management documentation, see [DOC_DNS.md](DOC_DNS.md).
+For complete DNS management documentation, see [DOC_DNS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_DNS.md).
 
 ### VLAN Management
 
@@ -117,7 +110,7 @@ curl -X GET "http://127.0.0.1:8000/vlan" \
      -H "access_token: your_zpod_password"
 ```
 
-For complete VLAN management documentation, see [DOC_VLAN.md](DOC_VLAN.md).
+For complete VLAN management documentation, see [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md).
 
 
 ## Development
@@ -135,7 +128,7 @@ A `justfile` wraps the same commands (`just test`, `just lint`, `just format`).
 
 ### Releasing
 
-Every change gets a line under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). A release is
+Every change gets a line under `[Unreleased]` in [CHANGELOG.md](https://github.com/zPodFactory/zboxapi/blob/main/CHANGELOG.md). A release is
 one command:
 
 ```bash
@@ -146,7 +139,7 @@ It turns `[Unreleased]` into a dated `[0.2.0]` section, bumps `pyproject.toml` a
 runs the tests, commits, tags `v0.2.0` and pushes. The tag then runs
 `.github/workflows/release.yml`, which publishes the changelog section as the GitHub release
 note, builds the package with `uv build`, publishes it to PyPI with `uv publish` and attaches
-the wheel and sdist to the release. See [tools/README.md](tools/README.md) for the details,
+the wheel and sdist to the release. See [tools/README.md](https://github.com/zPodFactory/zboxapi/blob/main/tools/README.md) for the details,
 including the one-time PyPI setup (an API token secret or trusted publishing).
 
 The test suite exercises every endpoint through FastAPI's `TestClient`. The hosts file,
@@ -156,5 +149,5 @@ replaced by an in-memory fake, so the tests can run on any machine.
 
 ## Documentation
 
-- [DOC_DNS.md](DOC_DNS.md) - Complete guide to DNS management features
-- [DOC_VLAN.md](DOC_VLAN.md) - Complete guide to VLAN management features
+- [DOC_DNS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_DNS.md) - Complete guide to DNS management features
+- [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md) - Complete guide to VLAN management features
