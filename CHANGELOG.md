@@ -20,6 +20,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-10-04
+
 ### Fixed
 - **PyPI project page links.** The README now uses absolute GitHub URLs, so the links to
   `DOC_DNS.md`, `DOC_VLAN.md`, the changelog and the release guide work on pypi.org instead
