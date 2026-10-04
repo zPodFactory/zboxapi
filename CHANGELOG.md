@@ -20,6 +20,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-10-04
+
 ### Added
 - **Releases follow the shared zPodFactory standard.** `tools/release.py` cuts a version
   (changelog heading, `pyproject.toml` and `uv.lock` bump, tests, commit, tag, push) and
