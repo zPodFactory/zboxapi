@@ -16,3 +16,10 @@ __pycache__/
 logs/*
 !logs/README.rst
 
+
+# Local list of strings that must never enter the history (tools/release.py --check)
+.release-denylist
+
+# Local scratch: planning notes and run transcripts, never committed
+docs/
+runs/

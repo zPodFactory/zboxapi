@@ -1,11 +1,67 @@
 # Changelog
 
-All notable changes to the zboxapi project will be documented in this file.
+Notable changes to zboxapi, newest first. Format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versions follow
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html): `0.2.0` is the version in
+`pyproject.toml`, the package on PyPI, and the git tag `v0.2.0`.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Entries describe what changed for the person running the API on a zbox or calling it: endpoints,
+validation, status codes, configuration, installation. The commit history has the reasoning.
 
-## [0.0.7] - 2025-07-07
+**Cutting a release.** Changes land under `[Unreleased]` as they are made. Then
+`python3 tools/release.py X.Y.Z --push` (or `just release X.Y.Z`) does the rest: `[Unreleased]`
+becomes `[X.Y.Z] — date`, the version moves in `pyproject.toml` and `uv.lock`, the tests run, the
+commit is tagged `vX.Y.Z` and pushed, and the tag publishes this file's section as the GitHub
+release note, with the PyPI link and install commands above it, then publishes the package to
+PyPI (`.github/workflows/release.yml`, `tools/release_notes.py`). The script refuses a dirty tree,
+an empty `[Unreleased]` (`--from-commits` fills it from the commits), a version not above the
+last tag, a failing suite, and any string from the local `.release-denylist`; `--check` runs the
+same rules, and CI runs it on every push. Preview a note with `python3 tools/release_notes.py X.Y.Z`.
+
+## [Unreleased]
+
+### Added
+- **Releases follow the shared zPodFactory standard.** `tools/release.py` cuts a version
+  (changelog heading, `pyproject.toml` and `uv.lock` bump, tests, commit, tag, push) and
+  `tools/release_notes.py` publishes the changelog section as the GitHub release note.
+  `.github/workflows/release.yml` runs it on every tag, then builds the wheel and sdist,
+  publishes them to PyPI with `uv publish` and attaches them to the release.
+  `.github/workflows/checks.yml` runs the release rules and the test suite on every push.
+  See `tools/README.md`.
+- **Unit tests**: pytest suite covering hostname validation, hosts-file handling,
+  VLAN configuration/validation, every `/dns` and `/vlan` endpoint, authentication and
+  OpenAPI operation IDs. System paths and commands are faked, so the tests run anywhere.
+- **Python 3.14 support**: tested on Python 3.13 and 3.14; classifiers list 3.10 to 3.14.
+
+### Changed
+- **Build tooling**: migrated from Poetry to [uv](https://docs.astral.sh/uv/) with a
+  PEP 621 `pyproject.toml`, the `uv_build` backend and `uv.lock`. `justfile` recipes now
+  use `uv` and include `test`, `lint` and `format`.
+- **Dependencies**: FastAPI, Pydantic and uvicorn upgraded to current releases
+  (Pydantic 2.12+ is required for Python 3.14). `ipython` moved to the dev group.
+- **Hostname validation**: fully qualified names such as `esx01.lab.local` are now
+  accepted. Total length is limited to 253 characters and each label to 63, labels may
+  not start or end with a hyphen, and error messages name the offending label.
+- **Password lookup**: the zPod password is resolved at application startup (lifespan)
+  and cached, instead of at module import. Behaviour for the systemd service is unchanged.
+- **Operation IDs**: generated through FastAPI's `generate_unique_id_function`; the
+  previous post-hoc rewrite was a no-op on FastAPI 0.142+.
+- **Version string**: `zboxapi.__version__` is read from package metadata, so only
+  `pyproject.toml` needs bumping.
+
+### Fixed
+- **VLAN create/update when a system VLAN interface has no address**: the overlap check
+  tried to parse the `system-default` / `system-zpod` placeholder as a network and
+  rejected every request with a misleading "Network overlap detected" error. Placeholders
+  are now skipped.
+- **403 for system VLANs on update and delete**: `PUT /vlan/{id}` and `DELETE /vlan/{id}`
+  returned 500 for system VLANs; they now return 403 like `enable` and `disable`, as
+  documented.
+- **Config paths**: the hosts file, `/etc/zboxapi.conf` and `/etc/network/interfaces.d`
+  are module-level constants (`HOSTS_FILE`, `CONFIG_FILE`, `INTERFACES_DIR`), making them
+  overridable in tests.
+
+## [0.0.7] — 2025-07-07
 
 ### Added
 - **VLAN Management API**: Complete VLAN interface management system
@@ -31,37 +87,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **Unused Imports**: Cleaned up unused `os` and `IO` imports
 
-## [0.0.6] - 2024-05-22
+## [0.0.6] — 2024-05-22
+
+### Changed
+- **Breaking**: the DNS record field `fqdn` is renamed `hostname` in request bodies,
+  responses and the `/dns/{ip}/{hostname}` path.
+
+## [0.0.5] — 2024-05-20
+
+### Changed
+- DNS endpoints refactored: records are addressed as `/dns/{ip}/{hostname}` for get, update
+  and delete, and every mutating call returns the full record list.
+
+## [0.0.4] — 2024-05-15
 
 ### Added
-- **DNS Management API**: Complete DNS record management system
-  - Create, read, update, and delete DNS records in `/etc/hosts`
-  - Automatic dnsmasq integration with SIGHUP reloading
-  - File locking for concurrent access safety
-  - RFC 1123 compliant hostname validation
-  - IPv4 address validation
-- **Authentication System**: API key authentication using zPod password
-- **Configuration Management**: Support for `/etc/zboxapi.conf` configuration file
-- **Systemd Service**: Complete systemd service integration
-- **Comprehensive Documentation**: Complete API documentation with examples
+- `ZBOXAPI_ROOT_PATH` environment variable (and a commented `Environment=` line in
+  `zboxapi.service`) so the API can sit behind a reverse proxy under a path prefix.
 
-### Technical Details
-- **File Management**: Thread-safe operations with file locking
-- **Error Handling**: Comprehensive HTTP status codes and error messages
-- **Validation**: Strict input validation for all API endpoints
-- **Integration**: Seamless dnsmasq integration for immediate DNS updates
+### Changed
+- Listens on `127.0.0.1:8000` by default.
+- Operation IDs simplified to `<tag>_<function>` for generated clients; schema names updated.
+- Dependencies updated.
 
----
+## [0.0.3] — 2024-05-10
 
-## Version History
+### Changed
+- README no longer recommends pyenv; `pipx install zboxapi` is the supported install.
 
-- **0.0.6**: Initial release with DNS management functionality
-- **0.0.7**: Added VLAN management, improved DNS validation, and code quality fixes
+## [0.0.2] — 2024-05-08
 
-## Contributing
-
-When adding new entries to this changelog, please follow the existing format and include:
-- Clear, descriptive change messages
-- Categorization (Added, Changed, Fixed, Removed, etc.)
-- Technical details where relevant
-- Breaking changes clearly marked
+### Added
+- Initial release: a FastAPI service on the zbox VM that manages DNS records in `/etc/hosts`
+  (list, get, add, update, delete) and reloads dnsmasq after each change. Every request
+  carries the zPod password in the `access_token` header; the password is read from the
+  VMware guest OVF environment.

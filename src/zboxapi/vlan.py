@@ -12,6 +12,10 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import AfterValidator, BaseModel, Field
 from pydantic_core import PydanticCustomError
 
+# Paths managed by this API (module-level so tests can override)
+CONFIG_FILE = Path("/etc/zboxapi.conf")
+INTERFACES_DIR = Path("/etc/network/interfaces.d")
+
 
 class ConfigError(Exception):
     """Configuration error"""
@@ -28,17 +32,20 @@ class NetworkError(Exception):
 def load_config() -> configparser.ConfigParser:
     """Load configuration from /etc/zboxapi.conf"""
     config = configparser.ConfigParser()
-    config_path = Path("/etc/zboxapi.conf")
+    config_path = CONFIG_FILE
 
     if not config_path.exists():
-        raise ConfigError("Configuration file /etc/zboxapi.conf not found")
+        raise ConfigError(f"Configuration file {config_path} not found")
 
     config.read(config_path)
     return config
 
 
 def get_config_value(
-    config: configparser.ConfigParser, section: str, key: str, default: str = None
+    config: configparser.ConfigParser,
+    section: str,
+    key: str,
+    default: str | None = None,
 ) -> str:
     """Get configuration value with optional default"""
     try:
@@ -115,7 +122,7 @@ def validate_cidr(cidr: str) -> str:
     """Validate CIDR notation, but preserve the original input."""
     try:
         # Parse the CIDR to validate it's correct
-        network = ipaddress.IPv4Network(cidr, strict=False)
+        ipaddress.IPv4Network(cidr, strict=False)
         # But return the original input, not the normalized network
         return cidr
     except ValueError as e:
@@ -150,7 +157,9 @@ def check_no_overlap(cidrs):
     return True
 
 
-def validate_vlan_networks(new_gateway: str, exclude_vlan_id: int = None) -> None:
+def validate_vlan_networks(
+    new_gateway: str, exclude_vlan_id: int | None = None
+) -> None:
     """Validate that a new gateway doesn't overlap with existing VLAN networks"""
     # Get all existing VLAN gateways
     existing_vlans = get_existing_vlans()
@@ -159,6 +168,13 @@ def validate_vlan_networks(new_gateway: str, exclude_vlan_id: int = None) -> Non
     for vlan in existing_vlans:
         # Skip the VLAN we're updating (if this is an update operation)
         if exclude_vlan_id is not None and vlan.vlan == exclude_vlan_id:
+            continue
+        # System VLANs whose interface has no address carry a placeholder
+        # ("system-default" / "system-zpod") instead of a CIDR: nothing to
+        # compare against, so leave them out of the overlap check.
+        try:
+            ipaddress.ip_network(vlan.gateway, strict=False)
+        except ValueError:
             continue
         all_gateways.append(vlan.gateway)
 
@@ -192,9 +208,9 @@ class VlanView(BaseModel):
 
 @contextlib.contextmanager
 def get_vlan_config_file_object(vlan_id: int):
-    """Context manager for safely handling VLAN configuration files in /etc/network/interfaces.d/"""
+    """Context manager for safely handling VLAN config files in interfaces.d/"""
     interface_name = get_interface_name()
-    config_dir = Path("/etc/network/interfaces.d")
+    config_dir = INTERFACES_DIR
     config_file = config_dir / f"{interface_name}.{vlan_id}.cfg"
 
     # Ensure the directory exists
@@ -205,7 +221,7 @@ def get_vlan_config_file_object(vlan_id: int):
             file_handle = config_file.open("w")  # Use write mode for individual files
             fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
-        except IOError:
+        except OSError:
             time.sleep(0.1)
 
     try:
@@ -215,108 +231,95 @@ def get_vlan_config_file_object(vlan_id: int):
         file_handle.close()
 
 
+def get_interface_status(interface_name_full: str) -> str:
+    """Return up if the interface exists and is up, otherwise down"""
+    try:
+        result = subprocess.run(
+            ["ip", "link", "show", interface_name_full],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0 and "UP" in result.stdout:
+            return "up"
+    except Exception:
+        pass
+    return "down"
+
+
+def get_interface_gateway(interface_name_full: str) -> str | None:
+    """Return the first inet address (CIDR) of an interface, if any"""
+    try:
+        result = subprocess.run(
+            ["ip", "addr", "show", interface_name_full],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", result.stdout)
+            if ip_match:
+                return ip_match.group(1)
+    except Exception:
+        pass
+    return None
+
+
+def get_system_vlan_view(interface_name: str, vlan_id: int, owner: str) -> VlanView:
+    """Build the view of a system VLAN from the live interface state"""
+    interface_name_full = f"{interface_name}.{vlan_id}"
+    return VlanView(
+        vlan=vlan_id,
+        gateway=get_interface_gateway(interface_name_full) or owner,
+        interface=interface_name_full,
+        status=get_interface_status(interface_name_full),
+        owner=owner,
+    )
+
+
+def get_user_vlan_view(
+    interface_name: str, vlan_id: int, config_file: Path
+) -> VlanView | None:
+    """Build the view of a user-defined VLAN from its interfaces.d config file"""
+    try:
+        content = config_file.read_text()
+    except OSError:
+        return None
+
+    # Extract gateway from the configuration
+    gateway_match = re.search(r"address\s+(\d+\.\d+\.\d+\.\d+/\d+)", content)
+    if not gateway_match:
+        return None
+
+    interface_name_full = f"{interface_name}.{vlan_id}"
+    return VlanView(
+        vlan=vlan_id,
+        gateway=gateway_match.group(1),
+        interface=interface_name_full,
+        status=get_interface_status(interface_name_full),
+        owner="user-defined",
+    )
+
+
 def get_existing_vlans() -> list[VlanView]:
-    """Get all existing VLAN configurations from /etc/network/interfaces.d/ and system VLANs"""
+    """Get all VLANs: system VLANs from config plus user VLANs from interfaces.d/"""
     interface_name = get_interface_name()
-    config_dir = Path("/etc/network/interfaces.d")
+    config_dir = INTERFACES_DIR
 
-    vlans = []
-
-    # Add system default VLANs
     system_vlans_default = get_system_vlans_default()
-    for vlan_id in system_vlans_default:
-        # Try to get actual gateway from ip addr command
-        gateway = "system-default"
-        interface_name_full = f"{interface_name}.{vlan_id}"
-
-        # Check if interface is currently up
-        status = "down"
-        try:
-            result = subprocess.run(
-                ["ip", "link", "show", interface_name_full],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode == 0 and "UP" in result.stdout:
-                status = "up"
-        except Exception:
-            pass
-
-        try:
-            result = subprocess.run(
-                ["ip", "addr", "show", interface_name_full],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode == 0:
-                # Extract IP address from ip addr output
-                ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", result.stdout)
-                if ip_match:
-                    gateway = ip_match.group(1)
-        except Exception:
-            pass
-
-        vlans.append(
-            VlanView(
-                vlan=vlan_id,
-                gateway=gateway,
-                interface=interface_name_full,
-                status=status,
-                owner="system-default",
-            )
-        )
-
-    # Add system zPod VLANs
     system_vlans_zpod = get_system_vlans_zpod()
-    for vlan_id in system_vlans_zpod:
-        # Try to get actual gateway from ip addr command
-        gateway = "system-zpod"
-        interface_name_full = f"{interface_name}.{vlan_id}"
 
-        # Check if interface is currently up
-        status = "down"
-        try:
-            result = subprocess.run(
-                ["ip", "link", "show", interface_name_full],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode == 0 and "UP" in result.stdout:
-                status = "up"
-        except Exception:
-            pass
+    vlans = [
+        get_system_vlan_view(interface_name, vlan_id, "system-default")
+        for vlan_id in system_vlans_default
+    ]
+    vlans.extend(
+        get_system_vlan_view(interface_name, vlan_id, "system-zpod")
+        for vlan_id in system_vlans_zpod
+    )
 
-        try:
-            result = subprocess.run(
-                ["ip", "addr", "show", interface_name_full],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            if result.returncode == 0:
-                # Extract IP address from ip addr output
-                ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", result.stdout)
-                if ip_match:
-                    gateway = ip_match.group(1)
-        except Exception:
-            pass
-
-        vlans.append(
-            VlanView(
-                vlan=vlan_id,
-                gateway=gateway,
-                interface=interface_name_full,
-                status=status,
-                owner="system-zpod",
-            )
-        )
-
-    # Add user-configured VLANs from /etc/network/interfaces.d/
+    # Add user-configured VLANs from interfaces.d/
     if config_dir.exists():
-        # Find all VLAN configuration files
         vlan_pattern = rf"{re.escape(interface_name)}\.(\d+)\.cfg$"
 
         for config_file in config_dir.glob(f"{interface_name}.*.cfg"):
@@ -330,44 +333,8 @@ def get_existing_vlans() -> list[VlanView]:
             if vlan_id in system_vlans_default or vlan_id in system_vlans_zpod:
                 continue
 
-            try:
-                with open(config_file, "r") as f:
-                    content = f.read()
-
-                # Extract gateway from the configuration
-                gateway_match = re.search(
-                    r"address\s+(\d+\.\d+\.\d+\.\d+/\d+)", content
-                )
-                if not gateway_match:
-                    continue
-
-                gateway = gateway_match.group(1)
-
-                # Check if interface is currently up
-                status = "down"
-                try:
-                    result = subprocess.run(
-                        ["ip", "link", "show", f"{interface_name}.{vlan_id}"],
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if result.returncode == 0 and "UP" in result.stdout:
-                        status = "up"
-                except Exception:
-                    pass
-
-                vlans.append(
-                    VlanView(
-                        vlan=vlan_id,
-                        gateway=gateway,
-                        interface=f"{interface_name}.{vlan_id}",
-                        status=status,
-                        owner="user-defined",
-                    )
-                )
-            except Exception:
-                continue  # Skip files that can't be read or parsed
+            if view := get_user_vlan_view(interface_name, vlan_id, config_file):
+                vlans.append(view)
 
     return sorted(vlans, key=lambda x: x.vlan)
 
@@ -381,8 +348,7 @@ def add_vlan_interface(vlan_id: int, gateway: str) -> None:
     validate_vlan_networks(gateway)
 
     # Check if VLAN configuration file already exists
-    config_dir = Path("/etc/network/interfaces.d")
-    config_file = config_dir / f"{interface_name}.{vlan_id}.cfg"
+    config_file = INTERFACES_DIR / f"{interface_name}.{vlan_id}.cfg"
 
     if config_file.exists():
         raise NetworkError(f"VLAN interface {interface_name}.{vlan_id} already exists")
@@ -404,12 +370,11 @@ def update_vlan_interface(vlan_id: int, gateway: str) -> None:
     interface_name = get_interface_name()
     mtu = get_mtu()
 
-    # Validate inputs - check for overlaps and gateway uniqueness, excluding current VLAN
+    # Validate inputs - check for overlaps, excluding the VLAN being updated
     validate_vlan_networks(gateway, exclude_vlan_id=vlan_id)
 
     # Check if VLAN configuration file exists
-    config_dir = Path("/etc/network/interfaces.d")
-    config_file = config_dir / f"{interface_name}.{vlan_id}.cfg"
+    config_file = INTERFACES_DIR / f"{interface_name}.{vlan_id}.cfg"
 
     if not config_file.exists():
         raise NetworkError(f"VLAN interface {interface_name}.{vlan_id} does not exist")
@@ -429,8 +394,7 @@ iface {interface_name}.{vlan_id} inet static
 def delete_vlan_interface(vlan_id: int) -> None:
     """Delete VLAN interface configuration from /etc/network/interfaces.d/"""
     interface_name = get_interface_name()
-    config_dir = Path("/etc/network/interfaces.d")
-    config_file = config_dir / f"{interface_name}.{vlan_id}.cfg"
+    config_file = INTERFACES_DIR / f"{interface_name}.{vlan_id}.cfg"
 
     if not config_file.exists():
         raise NetworkError(f"VLAN interface {interface_name}.{vlan_id} does not exist")
@@ -572,6 +536,9 @@ def vlan_update(vlan_id: int, vlan_in: VlanUpdate) -> VlanView:
             status="up",
             owner="user-defined",
         )
+    except PydanticCustomError as e:
+        # System VLANs are forbidden from modification
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except (ConfigError, NetworkError) as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
@@ -590,10 +557,13 @@ def vlan_delete(vlan_id: int) -> dict:
         # Validate VLAN ID
         validate_vlan_id(vlan_id)
 
-        # Delete VLAN interface configuration (includes bringing down and deleting interface)
+        # Delete VLAN configuration (brings the interface down first)
         delete_vlan_interface(vlan_id)
 
         return {"message": f"VLAN {vlan_id} deleted successfully"}
+    except PydanticCustomError as e:
+        # System VLANs are forbidden from modification
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
     except (ConfigError, NetworkError) as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)

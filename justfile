@@ -4,43 +4,46 @@ set positional-arguments
 @_default:
   just --list --list-heading $'Commands:\n'
 
-# Create a release version
-zboxapi-release version:
-  #!/usr/bin/env bash
-  set -euo pipefail
+# Install the project and dev dependencies into .venv (uv)
+sync:
+  uv sync
 
-  # Verify gh is installed
-  if ! command -v gh >/dev/null 2>&1; then
-      echo 'Install gh first'
-      exit 1
-  fi
+# Run the unit tests
+test *args:
+  uv run pytest {{args}}
 
-  # Verify user is logged into gh
-  if ! gh auth status >/dev/null 2>&1; then
-      echo 'You need to login: gh auth login'
-      exit 1
-  fi
+# Run the unit tests with a coverage report
+test-cov:
+  uv run pytest --cov --cov-report=term-missing
 
-  # Verify that repo is clean
-  cd {{justfile_directory()}}
-  if [[ `git status --porcelain` ]]; then
-    # Dirty repo
-    echo 'Uncommited changes in repo.  Commit or remove changes before creating release.'
-    exit 1
-  fi
+# Lint and check formatting
+lint:
+  uv run ruff check src tests
+  uv run ruff format --check src tests
 
-  # Set version
-  poetry version {{version}}
-  newversion=$(poetry version -s)
+# Format the code and apply safe lint fixes
+format:
+  uv run ruff format src tests
+  uv run ruff check --fix src tests
 
-  # Commit changes
-  git commit -am"Version v${newversion}"
-  git push
+# Release checks that must hold between releases too (CI runs the same)
+release-check:
+  python3 tools/release.py --check
+  python3 tools/release_notes.py --check
 
-  # Create github release
-  gh release create v${newversion} --generate-notes
+# The commits since the last tag, as changelog entry candidates (add --write to insert them)
+release-draft *args:
+  python3 tools/release.py --draft {{args}}
 
-  # Build and publish zboxapi
-  cd {{justfile_directory()}}
-  poetry build
-  poetry publish
+# Cut a release: changelog, version bump, tests, commit, tag, push; CI publishes notes and PyPI
+release version *args:
+  python3 tools/release.py {{version}} --push {{args}}
+
+# Build the wheel and sdist into dist/
+build:
+  rm -rf dist
+  uv build
+
+# Upload a local build to PyPI (fallback for when the release workflow cannot; needs UV_PUBLISH_TOKEN)
+publish: build
+  uv publish

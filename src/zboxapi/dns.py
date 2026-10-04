@@ -12,11 +12,14 @@ from fastapi import APIRouter, HTTPException, status
 from pydantic import AfterValidator, BaseModel
 from pydantic_core import PydanticCustomError
 
+# Path of the hosts file managed by this API (module-level so tests can override)
+HOSTS_FILE = Path("/etc/hosts")
+
 
 @contextlib.contextmanager
 def get_hosts_file_object():
-    """Context manager for safely handling /etc/hosts file"""
-    pfile = Path("/etc/hosts")
+    """Context manager for safely handling the hosts file"""
+    pfile = HOSTS_FILE
     if not pfile.is_file():
         pfile.write_text("")
 
@@ -25,7 +28,7 @@ def get_hosts_file_object():
             file_handle = pfile.open("r+")
             fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             break
-        except IOError:  # noqa: UP024
+        except OSError:
             # File is locked, wait for a while and try again
             time.sleep(0.1)
 
@@ -105,19 +108,37 @@ def RecordAlreadyPresent(ip, hostname):
 
 
 def validate_hostname(value: str):
-    """Validate hostname format"""
-    if not 1 <= len(value) < 64:
-        raise PydanticCustomError("value_error", "Invalid hostname length")
+    """Validate hostname format according to DNS standards"""
+    # Check total FQDN length (1-253 characters)
+    if not 1 <= len(value) <= 253:
+        raise PydanticCustomError(
+            "value_error",
+            f"Invalid hostname length: {len(value)} characters (must be 1-253)",
+        )
 
-    #  Define pattern of DNS label
-    #  Can begin and end with a number or letter only
-    #  Can contain hyphens, a-z, A-Z, 0-9
-    #  1 - 63 chars allowed
-    hostname_re = re.compile(r"^[a-z0-9]([a-z-0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
+    # Define pattern for individual DNS labels
+    # Each label: 1-63 chars, alphanumeric + hyphens, can't start/end with hyphen
+    label_re = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", re.IGNORECASE)
 
-    # Check that all labels match that pattern.
-    if not hostname_re.match(value):
-        raise PydanticCustomError("value_error", "Invalid hostname")
+    # Check that all labels match the pattern and length requirements
+    for label in value.split("."):
+        if not label:  # Empty label (leading/trailing/consecutive dots)
+            raise PydanticCustomError("value_error", "Invalid hostname: empty label")
+
+        # Check individual label length (1-63 characters)
+        if len(label) > 63:
+            raise PydanticCustomError(
+                "value_error",
+                f"Invalid label length: '{label}' is {len(label)} characters "
+                "(must be 1-63)",
+            )
+
+        # Check label format (alphanumeric + hyphens, can't start/end with hyphen)
+        if not label_re.match(label):
+            raise PydanticCustomError(
+                "value_error", f"Invalid hostname label: '{label}'"
+            )
+
     return value
 
 

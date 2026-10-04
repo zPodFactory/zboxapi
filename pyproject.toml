@@ -1,25 +1,59 @@
-[tool.poetry]
+[project]
 name = "zboxapi"
 version = "0.0.7"
-description = ""
-authors = ["Kelby Valenti <kelby.valenti@gmail.com>", "Timo Sugliani <timo.sugliani@gmail.com>"]
+description = "zPodFactory zBox API: DNS and VLAN management for the zbox VM"
 readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Kelby Valenti", email = "kelby.valenti@gmail.com" },
+    { name = "Timo Sugliani", email = "timo.sugliani@gmail.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Framework :: FastAPI",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "fastapi>=0.118",
+    "pydantic>=2.12",
+    "uvicorn>=0.37",
+]
 
-[tool.poetry.scripts]
+[project.scripts]
 zboxapi = "zboxapi.main:launch"
 
-[tool.poetry.dependencies]
-fastapi = "0.111.0"
-python = ">=3.10"
-uvicorn = "0.29.0"
-ipython = "^8.24.0"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.4"
+[dependency-groups]
+dev = [
+    "httpx2>=0.1",
+    "ipython>=8.24",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.13",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.9,<1"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.9"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["zboxapi"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
 
 [tool.ruff.lint]
 select = [
@@ -34,10 +68,3 @@ select = [
 ignore = [
     "B008",
 ]
-
-[[tool.poetry_bumpversion.replacements]]
-files = [
-    "src/zboxapi/__init__.py",
-]
-search = '__version__ = "{current_version}"'
-replace = '__version__ = "{new_version}"'

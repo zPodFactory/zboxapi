@@ -29,6 +29,14 @@ Complete the following steps to set up zBox Api:
     pipx install zboxapi
     ```
 
+    Or with [uv](https://docs.astral.sh/uv/), which also fetches a suitable Python if needed:
+
+    ```bash
+    uv tool install zboxapi
+    ```
+
+    zBoxApi supports Python 3.10 through 3.14.
+
 1. Set up and start zboxapi.service
 
     ```bash
@@ -111,6 +119,40 @@ curl -X GET "http://127.0.0.1:8000/vlan" \
 
 For complete VLAN management documentation, see [DOC_VLAN.md](DOC_VLAN.md).
 
+
+## Development
+
+The project is managed with [uv](https://docs.astral.sh/uv/). Clone the repository, then:
+
+```bash
+uv sync                 # create .venv with the project and dev dependencies
+uv run pytest           # run the unit tests (no root, /etc or network access needed)
+uv run pytest --cov     # same, with a coverage report
+uv run ruff check src tests && uv run ruff format --check src tests
+```
+
+A `justfile` wraps the same commands (`just test`, `just lint`, `just format`).
+
+### Releasing
+
+Every change gets a line under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). A release is
+one command:
+
+```bash
+python3 tools/release.py 0.2.0 --push      # or: just release 0.2.0
+```
+
+It turns `[Unreleased]` into a dated `[0.2.0]` section, bumps `pyproject.toml` and `uv.lock`,
+runs the tests, commits, tags `v0.2.0` and pushes. The tag then runs
+`.github/workflows/release.yml`, which publishes the changelog section as the GitHub release
+note, builds the package with `uv build`, publishes it to PyPI with `uv publish` and attaches
+the wheel and sdist to the release. See [tools/README.md](tools/README.md) for the details,
+including the one-time PyPI setup (an API token secret or trusted publishing).
+
+The test suite exercises every endpoint through FastAPI's `TestClient`. The hosts file,
+`/etc/zboxapi.conf`, `/etc/network/interfaces.d/` and the `vmtoolsd` password lookup are
+redirected to temporary locations, and the `ip`, `ifup`, `ifdown` and `pkill` commands are
+replaced by an in-memory fake, so the tests can run on any machine.
 
 ## Documentation
 
