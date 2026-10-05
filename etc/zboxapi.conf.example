@@ -10,3 +10,22 @@ system_vlans_default = 10,20,30
 
 # System zPod VLANs that cannot be modified (comma-separated)
 system_vlans_zpod = 64,128,192
+
+# ── zcore only: disks, storages and NFS exports. Every key is optional. ──
+[storage]
+filer_root = /FILER
+# Never modified except grown; STORAGE01 is always included
+protected_storages = STORAGE01
+mount_unit_dir = /etc/systemd/system
+filesystem = ext4
+mkfs_options = -m 0 -E lazy_itable_init=0,lazy_journal_init=0
+mount_options = defaults,noatime,nofail
+
+[nfs]
+exports_file = /etc/exports.d/zboxapi.exports
+system_exports_file = /etc/exports
+# Never modified; NFS-01 is always included
+protected_exports = /FILER/STORAGE01/NFS-01
+export_options = rw,no_subtree_check,no_root_squash
+folder_owner = root:root
+folder_mode = 0777

@@ -4,11 +4,19 @@ Guidance for Claude Code (claude.ai/code) when working in this repository.
 
 ## Project Overview
 
-zboxapi is a FastAPI service that runs on the zPodFactory zbox VM (`127.0.0.1:8000`, as root,
-through `zboxapi.service`). It manages DNS records in `/etc/hosts` with a dnsmasq reload
-(`src/zboxapi/dns.py`) and VLAN interfaces under `/etc/network/interfaces.d/`
-(`src/zboxapi/vlan.py`). Every request carries the zPod password in the `access_token` header;
-`src/zboxapi/main.py` reads it from the VMware OVF environment at startup.
+zboxapi is a FastAPI service that runs on the zPodFactory zbox and zcore VMs (`127.0.0.1:8000`,
+as root, through `zboxapi.service`). On zbox it manages DNS records in `/etc/hosts` with a
+dnsmasq reload (`dns.py`) and VLAN interfaces under `/etc/network/interfaces.d/` (`vlan.py`).
+On zcore it manages disks and storages under `/FILER` (`disk.py`, `storage.py`, `ops.py`) and
+NFS exports (`nfs.py`). Every request carries the zPod password in the `access_token` header;
+`main.py` reads it from the VMware OVF environment at startup.
+
+The storage and nfs routers go through `system.py` (the only place that runs commands, with an
+audit log) and `guard.py` (the protected set: NFS-01, STORAGE01 and the disk behind it are never
+modified, except being grown; the system disk likewise). Keep every new host interaction behind
+`system.run`/`system.query` so the guard and the audit log see it, and add any new mutating
+endpoint to the protection matrix in `tests/test_guard.py`. DOC_STORAGE.md and DOC_NFS.md are
+the user-facing contract.
 
 ## Commands
 

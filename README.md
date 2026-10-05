@@ -6,6 +6,11 @@ zPodFactory zBox Api
 
 - **DNS Management**: Manage DNS records in `/etc/hosts` with automatic dnsmasq integration
 - **VLAN Management**: Manage VLAN interfaces with automatic network configuration
+- **NFS Exports** (zcore): Export folders under `/FILER/STORAGEnn` to clients, with
+  `/etc/exports.d/zboxapi.exports` and `exportfs -ra`
+- **Disks and Storages** (zcore): Turn a new disk into a mounted `/FILER/STORAGEnn`, raw or LVM,
+  grow it after a vSphere resize, manage its folders. NFS-01, STORAGE01 and the disk behind it
+  are never modified.
 
 ## Installation
 
@@ -64,6 +69,13 @@ system_vlans_zpod = 64,128,192
 
 See [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md) for detailed documentation on VLAN management features.
 
+### NFS and Storage (zcore)
+
+Both work without configuration. The optional `[storage]` and `[nfs]` sections of
+`/etc/zboxapi.conf` are documented in
+[DOC_STORAGE.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_STORAGE.md) and
+[DOC_NFS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_NFS.md).
+
 ## API Usage
 
 ### Authentication
@@ -112,6 +124,29 @@ curl -X GET "http://127.0.0.1:8000/vlan" \
 
 For complete VLAN management documentation, see [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md).
 
+### NFS Exports and Storage (zcore)
+
+```bash
+# What disks are attached, and what state each is in
+curl -H "access_token: your_zpod_password" http://127.0.0.1:8000/disk
+
+# Turn blank disk sdc into /FILER/STORAGE02 (LVM), preview first with ?dry_run=true
+curl -X POST "http://127.0.0.1:8000/storage" \
+     -H "access_token: your_zpod_password" -H "Content-Type: application/json" \
+     -d '{"disk": "sdc", "lvm": true}'
+
+# Export a folder on it (the folder is created if missing)
+curl -X POST "http://127.0.0.1:8000/nfs" \
+     -H "access_token: your_zpod_password" -H "Content-Type: application/json" \
+     -d '{"storage": "STORAGE02", "folder": "NFS-15", "clients": ["10.60.60.0/26"]}'
+
+# After enlarging the virtual disk in vSphere
+curl -X POST "http://127.0.0.1:8000/storage/STORAGE02/grow" -H "access_token: your_zpod_password"
+```
+
+See [DOC_STORAGE.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_STORAGE.md) and
+[DOC_NFS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_NFS.md).
+
 
 ## Development
 
@@ -151,3 +186,5 @@ replaced by an in-memory fake, so the tests can run on any machine.
 
 - [DOC_DNS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_DNS.md) - Complete guide to DNS management features
 - [DOC_VLAN.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_VLAN.md) - Complete guide to VLAN management features
+- [DOC_STORAGE.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_STORAGE.md) - Disks, storages, folders, and the guard rail (zcore)
+- [DOC_NFS.md](https://github.com/zPodFactory/zboxapi/blob/main/DOC_NFS.md) - NFS exports and clients (zcore)
