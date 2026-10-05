@@ -211,6 +211,15 @@ def test_sizes_are_what_duf_prints():
         ("PUT", "/storage/STORAGE01/NFS-01", {"mode": "0755"}),
         ("DELETE", "/storage/STORAGE01/NFS-01", None),
         ("DELETE", "/storage/STORAGE01/NFS-01?force=true", None),
+        (
+            "POST",
+            "/nfs",
+            {"storage": "STORAGE01", "folder": "NFS-01", "clients": ["*"]},
+        ),
+        ("PUT", "/nfs/STORAGE01/NFS-01", {"clients": ["*"]}),
+        ("POST", "/nfs/STORAGE01/NFS-01/client", {"client": "*"}),
+        ("DELETE", "/nfs/STORAGE01/NFS-01/client/10.60.60.0/26", None),
+        ("DELETE", "/nfs/STORAGE01/NFS-01", None),
     ],
 )
 def test_matrix_protected_targets_get_403_and_nothing_runs(
@@ -264,6 +273,7 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
     etc = tmp_path / "etc"
     seed_sdb = host.snapshot("sdb", sizes=False)
     seed_sizes = host.sizes("sdb")
+    seed_nfs01_export = host.active_exports[str(filer / "STORAGE01" / "NFS-01")]
     seed_exports = (etc / "exports").read_text()
     seed_nfs01 = sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
     host.hotplug(Disk(name="sdc", size=500 * G, serial="c"))
@@ -305,6 +315,25 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
             f"?force={rng.choice(['true', 'false'])}"
         ),
         lambda: (host.resize(rng.choice(["sdb", "sdc", "sdd"]), 2 * T), None)[1],
+        lambda: client.post(
+            "/nfs",
+            json={
+                "storage": rng.choice(["STORAGE01", "STORAGE02", "STORAGE03"]),
+                "folder": rng.choice(["NFS-01", "NFS-02", "NFS-06", "NFS-15"]),
+                "clients": [rng.choice(["*", "10.60.60.0/26", "bogus"])],
+            },
+        ),
+        lambda: client.put(
+            f"/nfs/STORAGE01/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06'])}",
+            json={"clients": ["192.168.0.0/24"]},
+        ),
+        lambda: client.delete(
+            f"/nfs/{rng.choice(['STORAGE01', 'STORAGE02'])}"
+            f"/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06', 'NFS-15'])}"
+        ),
+        lambda: client.delete(
+            f"/nfs/STORAGE01/{rng.choice(['NFS-01', 'NFS-06'])}/client/10.60.60.0/26"
+        ),
     ]
     for _ in range(300):
         rng.choice(actions)()
@@ -316,6 +345,7 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
         sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
         == seed_nfs01
     )
+    assert host.active_exports[str(filer / "STORAGE01" / "NFS-01")] == seed_nfs01_export
     sdb_cmds = [c for c in host.mutating_calls if any("sdb" in a for a in c)]
     assert all(guard.is_extend_only(c) for c in sdb_cmds), sdb_cmds
     assert not any(any("sda" in a for a in c) for c in host.mutating_calls)

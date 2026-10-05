@@ -19,7 +19,7 @@ from tests.fake_host import FakeHost, zcore
 
 PASSWORD = "s3cret-zpod-password"
 ME = f"{pwd.getpwuid(os.getuid()).pw_name}:{grp.getgrgid(os.getgid()).gr_name}"
-EXPORT_OPTS = "rw,sync,no_subtree_check,no_root_squash"
+EXPORT_OPTS = "rw,no_subtree_check,no_root_squash"
 
 CONFIG_TEXT = """[DEFAULT]
 interface = eth1
@@ -169,6 +169,7 @@ def filer(tmp_path, monkeypatch):
         f"exports_file = {etc / 'exports.d' / 'zboxapi.exports'}\n"
         f"system_exports_file = {etc / 'exports'}\n"
         f"protected_exports = {root}/STORAGE01/NFS-01\n"
+        f"folder_owner = {ME}\n"  # the API runs as root on zcore; the tests do not
     )
     monkeypatch.setattr(config, "CONFIG_FILE", etc / "zboxapi.conf")
     monkeypatch.setattr(system_mod, "AUDIT_LOG", tmp_path / "audit.log")

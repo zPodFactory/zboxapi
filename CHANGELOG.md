@@ -42,6 +42,14 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `DELETE` removes a folder when it is empty and not exported, or with everything in it
   when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
   answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
+- **NFS exports (phase 2).** `POST /nfs` exports `/FILER/STORAGEnn/FOLDER` to a list of
+  clients (IPv4 address, IPv4 CIDR or `*`), creating the folder with the configured owner and
+  mode when it is missing; `PUT /nfs/{storage}/{folder}` replaces the client list;
+  `POST .../client` and `DELETE .../client/{client}` add and remove one client, and removing
+  the last client removes the export; `DELETE /nfs/{storage}/{folder}` stops exporting and
+  always keeps the folder and its data. The API writes only `/etc/exports.d/zboxapi.exports`,
+  replaced atomically, and runs `exportfs -ra`. Exports in `/etc/exports` (owner `system`)
+  and NFS-01 answer 403 to every change.
 - **Disks and storages (phase 3).** `POST /disk/rescan` detects new disks and size changes,
   never touching the protected or system disks. `POST /storage` turns a blank disk into a
   mounted `/FILER/STORAGEnn` (GPT with one partition via sfdisk, optional one-VG-per-disk LVM,

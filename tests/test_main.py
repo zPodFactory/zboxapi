@@ -57,6 +57,11 @@ def test_requests_with_wrong_token_are_rejected(anon_client):
         ("DELETE", "/storage/STORAGE01/NFS-02"),
         ("GET", "/nfs"),
         ("GET", "/nfs/STORAGE01/NFS-01"),
+        ("POST", "/nfs"),
+        ("PUT", "/nfs/STORAGE01/NFS-02"),
+        ("POST", "/nfs/STORAGE01/NFS-02/client"),
+        ("DELETE", "/nfs/STORAGE01/NFS-02/client/10.60.60.0/26"),
+        ("DELETE", "/nfs/STORAGE01/NFS-02"),
     ],
 )
 def test_every_endpoint_requires_auth(anon_client, method, path):
@@ -136,6 +141,11 @@ def test_openapi_metadata_and_operation_ids(client):
         "storage_storage_folder_delete",
         "nfs_nfs_get_all",
         "nfs_nfs_get",
+        "nfs_nfs_create",
+        "nfs_nfs_update",
+        "nfs_nfs_client_add",
+        "nfs_nfs_client_remove",
+        "nfs_nfs_delete",
     }
 
 
