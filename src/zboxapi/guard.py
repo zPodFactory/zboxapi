@@ -1,5 +1,10 @@
 """The protected set: NFS-01, /FILER/STORAGE01, the disk behind it, everything on it.
 
+Protected means never modified, with one deliberate exception: a protected storage may
+be grown (rescan, growpart, pvresize, lvextend, resize2fs), because those steps only
+ever add space and leave the data where it is. The command runner lets exactly those
+command shapes through.
+
 Computed on every request from the live block device tree, so it follows the mount
 and not a device letter. STORAGE01 and NFS-01 are a floor: config can add to the set,
 never remove them. Three enforcement points use it: the endpoints (`assert_mutable`),
@@ -134,9 +139,27 @@ def assert_mutable(target: str, ps: ProtectedSet | None = None) -> None:
         raise ProtectedError(reason)
 
 
+def is_extend_only(argv: list[str]) -> bool:
+    """The exact command shapes that can only make a filesystem bigger, never smaller
+    and never different: growing is allowed on protected storages, nothing else is."""
+    match argv:
+        case ["growpart", _disk, number] if number.isdigit():
+            return True
+        case ["pvresize", _device]:
+            return True
+        case ["lvextend", "-l", "+100%FREE", _lv]:
+            return True
+        case ["resize2fs", _device]:  # no size argument: fill the device
+            return True
+        case ["sysfs-write", path] if path.endswith("/device/rescan"):
+            return True
+    return False
+
+
 def assert_argv_allowed(argv: list[str]) -> None:
-    """Layer 2, at the command runner: no mutating argv may name a protected member."""
-    if system.is_read_only(argv):
+    """Layer 2, at the command runner: no mutating argv may name a protected member,
+    unless the command is one of the extend-only shapes (see `is_extend_only`)."""
+    if system.is_read_only(argv) or is_extend_only(argv):
         return
     ps = protected_set()
     for token in argv[1:]:

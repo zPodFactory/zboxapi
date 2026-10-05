@@ -508,11 +508,8 @@ def plan_grow(name: str) -> tuple[ops.Plan, system.BlockNode, dict[str, int]]:
     node = system.find_mounted(mountpoint_of(name), nodes)
     if node is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Storage {name} not found")
-    try:
-        guard.assert_mutable(name, ps)
-        guard.assert_mutable(node.disk.path, ps)
-    except guard.ProtectedError as e:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e)) from e
+    # Growing is allowed on a protected storage: every step only adds space (see guard).
+    assert ps is not None
 
     part = node.parent if node.type == "lvm" else node
     if part is None or part.type != "part" or part.parent is None:
@@ -645,7 +642,10 @@ def plan_delete(name: str) -> ops.Plan:
     return plan
 
 
-def run_plan(plan: ops.Plan, *, dry_run: bool, verbose: bool) -> OperationResult:
+def run_plan(
+    plan: ops.Plan, *, dry_run: bool, verbose: bool, failure: str = "{error}"
+) -> OperationResult:
+    """`failure` formats the 500 message; `{error}` is the failing step's error."""
     if dry_run:
         return OperationResult(
             operation=plan.name, dry_run=True, steps=plan.views(verbose)
@@ -656,9 +656,9 @@ def run_plan(plan: ops.Plan, *, dry_run: bool, verbose: bool) -> OperationResult
         raise HTTPException(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             {
-                "message": str(e),
-                "steps": [s.model_dump() for s in e.steps],
-                "rollback": [s.model_dump() for s in e.rollback],
+                "message": failure.format(error=e),
+                "steps": [s.model_dump(exclude_none=True) for s in e.steps],
+                "rollback": [s.model_dump(exclude_none=True) for s in e.rollback],
             },
         ) from e
     return OperationResult(operation=plan.name, dry_run=False, steps=steps)
@@ -703,7 +703,13 @@ def storage_grow(
     """Grow a storage after its virtual disk was enlarged"""
     with system.storage_lock():
         plan, node, before = plan_grow(name)
-        result = run_plan(plan, dry_run=dry_run, verbose=verbose)
+        result = run_plan(
+            plan,
+            dry_run=dry_run,
+            verbose=verbose,
+            failure=f"Cannot grow {name}: {{error}}. The data is untouched and the "
+            "call can be retried",
+        )
         result.before = before
         if not dry_run:
             after_node = system.find_mounted(mountpoint_of(name)) or node

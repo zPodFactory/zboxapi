@@ -54,6 +54,12 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   storage terms (`step`, `target`, `detail`, `status`); a failed create is rolled back to a
   blank disk and the response lists what was undone. `lvm: true` answers 400 until lvm2 is
   installed.
+- **Growing is allowed on protected storages.** `POST /storage/STORAGE01/grow` works: rescan,
+  growpart, pvresize, lvextend and resize2fs only add space and move no data, so the command
+  runner lets exactly those command shapes through on a protected device and nothing else
+  (a `resize2fs` with a size, or `lvreduce`, stays refused). A failing step answers
+  `Cannot grow NAME: …` and changes nothing. `POST /disk/rescan` reads the size of every
+  disk, protected and system ones included; the response no longer has a `skipped` list.
 - **The system disk is protected too.** Whatever holds `/`, `/boot` or swap joins the
   protected set as devices (its partitions and LVM included), so the command runner
   refuses it like the STORAGE01 disk. Growing it remains `zbox-init --extend-disk`'s job.

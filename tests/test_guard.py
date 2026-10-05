@@ -115,18 +115,22 @@ def test_assert_mutable_allows_everything_else(host, filer, target):
 @pytest.mark.parametrize(
     "argv",
     [
-        ["growpart", "/dev/sdb", "1"],
         ["sgdisk", "--zap-all", "/dev/sdb"],
         ["mkfs.ext4", "/dev/sdb1"],
         ["umount", "{filer}/STORAGE01"],
         ["rm", "-rf", "{filer}/STORAGE01/NFS-01"],
         ["wipefs", "-a", "/dev/sdb1"],
-        ["sysfs-write", "/sys/class/block/sdb/device/rescan"],
+        ["sysfs-write", "/sys/class/block/sdb/device/scan"],
         ["systemd-mount", "What=/dev/sdb1"],
-        ["growpart", "/dev/sda", "1"],
         ["mkfs.ext4", "/dev/sda1"],
         ["sgdisk", "--zap-all", "/dev/sda"],
-        ["sysfs-write", "/sys/class/block/sda/device/rescan"],
+        [
+            "resize2fs",
+            "/dev/sdb1",
+            "10G",
+        ],  # a size argument can shrink: not extend-only
+        ["pvresize", "--setphysicalvolumesize", "10G", "/dev/sdb1"],
+        ["growpart", "/dev/sdb", "1", "--dry-run"],  # only the exact shape is allowed
     ],
 )
 def test_run_refuses_any_argv_naming_a_protected_member(host, filer, argv):
@@ -135,6 +139,22 @@ def test_run_refuses_any_argv_naming_a_protected_member(host, filer, argv):
         system.run(argv)
     assert host.mutating_calls == []
     assert not any(c[0] == argv[0] for c in host.calls)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["growpart", "/dev/sdb", "1"],
+        ["pvresize", "/dev/sdb1"],
+        ["lvextend", "-l", "+100%FREE", "/dev/vg_storage01/data"],
+        ["resize2fs", "/dev/sdb1"],
+        ["sysfs-write", "/sys/class/block/sdb/device/rescan"],
+    ],
+)
+def test_run_allows_extend_only_commands_on_protected_devices(host, argv):
+    """Growing adds space and moves no data: the one thing a protected disk allows."""
+    assert guard.is_extend_only(argv)
+    guard.assert_argv_allowed(argv)  # does not raise
 
 
 def test_run_lets_read_only_commands_name_protected_devices(host):
@@ -160,10 +180,10 @@ def test_lvm_on_protected_disk_blocks_vg_lv_argv(host, filer):
     part.mountpoint = None
     host.add_lv("vg_storage01", "data", "sdb1", mountpoint=str(filer / "STORAGE01"))
     for argv in (
-        ["lvextend", "-l", "+100%FREE", "vg_storage01/data"],
-        ["lvextend", "-l", "+100%FREE", "/dev/vg_storage01/data"],
+        ["lvreduce", "-L", "-10G", "vg_storage01/data"],
+        ["lvremove", "-y", "/dev/vg_storage01/data"],
         ["vgremove", "vg_storage01"],
-        ["resize2fs", "/dev/mapper/vg_storage01-data"],
+        ["resize2fs", "/dev/mapper/vg_storage01-data", "100G"],
     ):
         with pytest.raises(guard.ProtectedError):
             system.run(argv)
@@ -186,7 +206,6 @@ def test_sizes_are_what_duf_prints():
         ("POST", "/storage", {"disk": "sda"}),
         ("POST", "/storage/adopt", {"device": "sdb1"}),
         ("POST", "/storage/adopt", {"device": "sda1"}),
-        ("POST", "/storage/STORAGE01/grow", None),
         ("DELETE", "/storage/STORAGE01", None),
         ("POST", "/storage/STORAGE01/NFS-01", {}),
         ("PUT", "/storage/STORAGE01/NFS-01", {"mode": "0755"}),
@@ -204,7 +223,34 @@ def test_matrix_protected_targets_get_403_and_nothing_runs(
     assert host.mutating_calls == []
     assert (host.snapshot("sdb"), host.snapshot("sda")) == before
     assert sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*")) == nfs01
-    assert host.disks["sdb"].rescans == 0 and host.disks["sda"].rescans == 0
+
+
+def test_grow_is_the_one_operation_a_protected_storage_allows(client, host, filer):
+    host.resize("sdb", 2 * T)
+    r = client.post("/storage/STORAGE01/grow?verbose=true")
+    assert r.status_code == 200, r.text
+    assert r.json()["changed"] is True
+    assert r.json()["after"]["partition"] == 2 * T - 2 * 1024**2
+    part = host.disks["sdb"].parts[0]
+    assert part.fstype == "ext4" and part.uuid == "bbbb-storage01"  # same filesystem
+    assert part.mountpoint == str(filer / "STORAGE01")  # never unmounted
+    assert all(guard.is_extend_only(c) for c in host.mutating_calls)
+
+
+def test_grow_failure_on_protected_storage_changes_nothing(client, host, filer):
+    host.resize("sdb", 2 * T)
+    host.fail.add(("growpart",))
+    before = host.snapshot("sdb", sizes=False)
+    r = client.post("/storage/STORAGE01/grow")
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    assert detail["message"].startswith(
+        "Cannot grow STORAGE01: growpart on /dev/sdb1 failed"
+    )
+    assert "The data is untouched" in detail["message"]
+    assert detail["rollback"] == []
+    assert host.snapshot("sdb", sizes=False) == before
+    assert host.disks["sdb"].parts[0].size == T - 2 * 1024**2  # partition not grown
 
 
 def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_path):
@@ -216,7 +262,8 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
 
     rng = random.Random(4)
     etc = tmp_path / "etc"
-    seed_sdb = host.snapshot("sdb")
+    seed_sdb = host.snapshot("sdb", sizes=False)
+    seed_sizes = host.sizes("sdb")
     seed_exports = (etc / "exports").read_text()
     seed_nfs01 = sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
     host.hotplug(Disk(name="sdc", size=500 * G, serial="c"))
@@ -261,13 +308,14 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
     ]
     for _ in range(300):
         rng.choice(actions)()
-    assert host.snapshot("sdb") == seed_sdb
+    # sdb may only have grown: same layout, labels, UUIDs and mount, sizes never smaller
+    assert host.snapshot("sdb", sizes=False) == seed_sdb
+    assert all(a >= b for a, b in zip(host.sizes("sdb"), seed_sizes, strict=True))
     assert (etc / "exports").read_text() == seed_exports
     assert (
         sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
         == seed_nfs01
     )
-    assert host.disks["sdb"].rescans == 0
-    assert not any(
-        "sdb" in " ".join(c) or "sda" in " ".join(c) for c in host.mutating_calls
-    )
+    sdb_cmds = [c for c in host.mutating_calls if any("sdb" in a for a in c)]
+    assert all(guard.is_extend_only(c) for c in sdb_cmds), sdb_cmds
+    assert not any(any("sda" in a for a in c) for c in host.mutating_calls)

@@ -155,7 +155,6 @@ class ResizedDisk(BaseModel):
 class RescanResult(BaseModel):
     new: list[str]
     resized: list[ResizedDisk]
-    skipped: list[str]  # protected and system disks: their rescan node is never written
 
 
 def find_disk(name: str, nodes: list[system.BlockNode]) -> system.BlockNode | None:
@@ -166,18 +165,15 @@ def find_disk(name: str, nodes: list[system.BlockNode]) -> system.BlockNode | No
 
 
 def rescan() -> RescanResult:
-    """SCSI host scan for new disks, then a size rescan of every non-protected disk."""
+    """SCSI host scan for new disks, then a size rescan of every disk."""
     before = {d.name: d for d in system.block_devices() if d.type == "disk"}
-    ps = guard.protected_set(list(before.values()))
 
     for host_scan in sorted(system.SYS_SCSI_HOST.glob("host*/scan")):
         system.write_sysfs(host_scan, "- - -\n", source="disk_rescan")
 
-    skipped = []
+    # A size rescan reads the new geometry from the hypervisor and changes nothing on
+    # the disk, so every disk gets one, the protected and system ones included.
     for name in sorted(before):
-        if name in ps.devices:
-            skipped.append(name)
-            continue
         node = system.SYS_BLOCK / name / "device" / "rescan"
         if node.exists():
             system.write_sysfs(node, "1\n", source="disk_rescan")
@@ -197,13 +193,12 @@ def rescan() -> RescanResult:
             for name in sorted(before)
             if name in after and after[name].size != before[name].size
         ],
-        skipped=skipped,
     )
 
 
 @disk_router.post("/rescan", response_model=RescanResult)
 def disk_rescan() -> RescanResult:
-    """Detect new disks and size changes. Protected and system disks are left alone."""
+    """Detect new disks and size changes"""
     try:
         with system.storage_lock():
             return rescan()

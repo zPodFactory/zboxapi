@@ -73,7 +73,7 @@ def test_rescan_finds_new_disks_and_size_changes(client, host):
     host.hotplug(Disk(name="sdc", size=500 * G, serial="6000c29sdc"))
     r = client.post("/disk/rescan")
     assert r.status_code == 200, r.text
-    assert r.json() == {"new": ["sdc"], "resized": [], "skipped": ["sda", "sdb"]}
+    assert r.json() == {"new": ["sdc"], "resized": []}
     assert client.get("/disk/sdc").json()["state"] == "blank"
 
     host.resize("sdc", T)
@@ -89,20 +89,23 @@ def test_rescan_finds_new_disks_and_size_changes(client, host):
             "storage": None,
         }
     ]
-    assert client.post("/disk/rescan").json() == {
-        "new": [],
-        "resized": [],
-        "skipped": ["sda", "sdb"],
-    }
+    assert client.post("/disk/rescan").json() == {"new": [], "resized": []}
 
 
-def test_rescan_never_touches_protected_or_system_disks(client, host, tmp_path):
-    host.resize("sdb", 2 * T)  # grown in vSphere, but sdb is frozen
+def test_rescan_reads_new_sizes_of_every_disk_without_modifying_any(
+    client, host, tmp_path
+):
+    host.resize(
+        "sdb", 2 * T
+    )  # grown in vSphere; a size rescan is a read, so it is seen
     host.resize("sda", 100 * G)
     r = client.post("/disk/rescan")
-    assert r.json()["resized"] == []
-    assert host.disks["sdb"].rescans == 0 and host.disks["sda"].rescans == 0
-    assert host.disks["sdb"].size == T
-    log = (tmp_path / "audit.log").read_text()
-    assert "block/sdb/" not in log and "block/sda/" not in log
-    assert "scsi_host/host0/scan" in log
+    assert {d["disk"]: d["after"] for d in r.json()["resized"]} == {
+        "sdb": 2 * T,
+        "sda": 100 * G,
+    }
+    assert r.json()["resized"][1]["storage"] == "STORAGE01"
+    assert host.mutating_calls == []  # nothing was partitioned, formatted or mounted
+    assert (
+        host.disks["sdb"].parts[0].size == T - 2 * 1024**2
+    )  # the partition is untouched

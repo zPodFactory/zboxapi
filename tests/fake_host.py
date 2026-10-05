@@ -152,19 +152,36 @@ class FakeHost:
         self.lvs.append(lv)
         return lv
 
-    def snapshot(self, disk: str) -> str:
-        """A stable rendering of one disk and everything on it, for invariant checks."""
+    def snapshot(self, disk: str, *, sizes: bool = True) -> str:
+        """A stable rendering of one disk and everything on it, for invariant checks.
+        `sizes=False` leaves sizes and rescan counts out: growing may change those."""
         d = self.disks[disk]
+
+        def fields(obj):
+            return {
+                k: v
+                for k, v in obj.__dict__.items()
+                if sizes or k not in ("size", "rescans")
+            }
+
         return json.dumps(
             {
-                "disk": d.__dict__,
-                "parts": [p.__dict__ for p in d.parts],
+                "disk": {k: v for k, v in fields(d).items() if k != "parts"},
+                "parts": [fields(p) for p in d.parts],
                 "lvs": [
-                    lv.__dict__ for lv in self.lvs if lv.pv in {p.name for p in d.parts}
+                    fields(lv) for lv in self.lvs if lv.pv in {p.name for p in d.parts}
                 ],
             },
             default=str,
             sort_keys=True,
+        )
+
+    def sizes(self, disk: str) -> list[int]:
+        d = self.disks[disk]
+        return (
+            [d.size]
+            + [p.size for p in d.parts]
+            + [lv.size for lv in self.lvs if lv.pv in {p.name for p in d.parts}]
         )
 
     def _part(self, name: str) -> Part:
@@ -273,9 +290,10 @@ class FakeHost:
     def _dispatch(  # noqa: C901
         self, cmd: list[str], stdin: str | None = None
     ) -> tuple[int, str, str]:
+        self._apply_sysfs()  # a rescan write takes effect before the next command runs
         for prefix in self.fail:
             if tuple(cmd[: len(prefix)]) == prefix:
-                return 1, "", f"fake failure: {' '.join(cmd)}"
+                return 2, "", f"fake failure: {' '.join(cmd)}"
         if cmd[0] in LVM_COMMANDS and not self.lvm_installed:
             return 127, "", f"{cmd[0]}: command not found"
         match cmd:

@@ -162,7 +162,8 @@ def test_folder_create_rejects_bad_input(client, host, filer, folder, payload, m
 def test_reserved_folder_names(client, host, filer):
     # POST /storage/{name}/grow is the grow endpoint, so a folder called grow can
     # never be created; PUT and DELETE have no such sibling and must refuse the name.
-    assert client.post("/storage/STORAGE01/grow").status_code == 403  # grow, protected
+    r = client.post("/storage/STORAGE01/grow")
+    assert r.status_code == 200 and r.json()["operation"] == "storage_grow"
     for name in ("grow", "adopt", "folder"):
         r = client.put(f"/storage/STORAGE01/{name}", json={"mode": "0777"})
         assert r.status_code == 422 and "reserved name" in r.text
@@ -605,9 +606,6 @@ def test_grow_dry_run_and_refusals(client, host, filer):
     assert all(s["status"] == "planned" for s in r.json()["steps"])
     assert host.disks["sdd"].size == 2 * T and host.disks["sdd"].rescans == 0
 
-    r = client.post("/storage/STORAGE01/grow")
-    assert r.status_code == 403 and "protected" in r.json()["detail"]
-    assert host.disks["sdb"].rescans == 0
     assert client.post("/storage/STORAGE09/grow").status_code == 404
     assert client.post("/storage/bad/grow").status_code == 422
 
