@@ -20,6 +20,30 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+### Added
+- **Storage and NFS inventory (read-only, phase 1 of the NFS feature).** `GET /disk` lists
+  every block device with a state (`system`, `protected`, `blank`, `foreign`, `in-use`),
+  `GET /storage` lists the filesystems mounted at `/FILER/STORAGEnn` with layout, sizes and
+  folder listing, and `GET /nfs` merges `/etc/exports` (owner `system`) with
+  `/etc/exports.d/zboxapi.exports` (owner `user-defined`) and the live `exportfs -v`.
+  Nothing mutates yet.
+- **Guard rail for NFS-01.** `guard.py` computes a protected set on every request from the
+  live mount of STORAGE01 down to its disk, every partition and any LVM on it, plus the
+  NFS-01 export path; STORAGE01 and NFS-01 are a floor the config cannot remove. It is
+  enforced at the endpoints, inside the single command runner in `system.py` (which refuses
+  any mutating argv naming a protected member and audits every command to
+  `/var/log/zboxapi-storage.log`), and in the file writers.
+- **Config sections `[storage]` and `[nfs]`** in `/etc/zboxapi.conf`, every key optional. The
+  default export options are `rw,no_subtree_check,no_root_squash`, what zcore-init gives NFS-VCD.
+- **Folders (phase 2).** `POST /storage/{name}/folder` creates a top-level folder with an
+  owner (`user:group`) and an octal mode, defaulting to the config values;
+  `PUT /storage/{name}/folder/{folder}` applies chown and/or chmod, recursively on request;
+  `DELETE` removes a folder only when it is empty and not exported. NFS-01 answers 403 to
+  all three; other folders on STORAGE01 are manageable, as decided.
+- **The system disk is protected too.** Whatever holds `/`, `/boot` or swap joins the
+  protected set as devices (its partitions and LVM included), so the command runner
+  refuses it like the STORAGE01 disk. Growing it remains `zbox-init --extend-disk`'s job.
+
 ## [0.1.1] — 2026-10-04
 
 ### Fixed

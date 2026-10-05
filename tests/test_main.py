@@ -43,6 +43,16 @@ def test_requests_with_wrong_token_are_rejected(anon_client):
         ("DELETE", "/vlan/2000"),
         ("PUT", "/vlan/2000/enable"),
         ("PUT", "/vlan/2000/disable"),
+        ("GET", "/disk"),
+        ("GET", "/disk/sda"),
+        ("GET", "/storage"),
+        ("GET", "/storage/STORAGE01"),
+        ("GET", "/storage/STORAGE01/folder"),
+        ("POST", "/storage/STORAGE01/folder"),
+        ("PUT", "/storage/STORAGE01/folder/NFS-02"),
+        ("DELETE", "/storage/STORAGE01/folder/NFS-02"),
+        ("GET", "/nfs"),
+        ("GET", "/nfs/STORAGE01/NFS-01"),
     ],
 )
 def test_every_endpoint_requires_auth(anon_client, method, path):
@@ -108,6 +118,16 @@ def test_openapi_metadata_and_operation_ids(client):
         "vlan_vlan_delete",
         "vlan_vlan_enable",
         "vlan_vlan_disable",
+        "disk_disk_get_all",
+        "disk_disk_get",
+        "storage_storage_get_all",
+        "storage_storage_get",
+        "storage_storage_folders",
+        "storage_storage_folder_create",
+        "storage_storage_folder_update",
+        "storage_storage_folder_delete",
+        "nfs_nfs_get_all",
+        "nfs_nfs_get",
     }
 
 

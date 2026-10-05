@@ -12,7 +12,10 @@ from fastapi.routing import APIRoute
 from fastapi.security.api_key import APIKeyHeader
 
 from zboxapi import __version__
+from zboxapi.disk import disk_router
 from zboxapi.dns import dns_router
+from zboxapi.nfs import nfs_router
+from zboxapi.storage import storage_router
 from zboxapi.vlan import vlan_router
 
 api_key_header = APIKeyHeader(name="access_token", auto_error=False)
@@ -73,6 +76,9 @@ app = FastAPI(
 # Include routers
 app.include_router(dns_router)
 app.include_router(vlan_router)
+app.include_router(disk_router)
+app.include_router(storage_router)
+app.include_router(nfs_router)
 
 
 def launch():

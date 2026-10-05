@@ -6,11 +6,15 @@ import subprocess
 import pytest
 from fastapi.testclient import TestClient
 
+import zboxapi.config as config
 import zboxapi.dns as dns
 import zboxapi.main as main
+import zboxapi.system as system_mod
 import zboxapi.vlan as vlan
+from tests.fake_host import FakeHost, zcore
 
 PASSWORD = "s3cret-zpod-password"
+EXPORT_OPTS = "rw,sync,no_subtree_check,no_root_squash"
 
 CONFIG_TEXT = """[DEFAULT]
 interface = eth1
@@ -132,6 +136,56 @@ def interfaces_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def filer(tmp_path, monkeypatch):
+    """A temp /FILER with STORAGE01 and its folders, plus the storage/nfs config."""
+    root = tmp_path / "FILER"
+    for name in ("NFS-01", "NFS-02", "NFS-03", "NFS-04", "NFS-05", "NFS-VCD"):
+        (root / "STORAGE01" / name).mkdir(parents=True)
+    (root / "STORAGE01" / "NFS-01" / "vm-esx01").mkdir()
+    (root / "STORAGE01" / "NFS-01" / "vm-esx01" / "esx01.vmdk").write_text("data")
+
+    etc = tmp_path / "etc"
+    (etc / "exports.d").mkdir(parents=True)
+    (etc / "systemd" / "system").mkdir(parents=True)
+    s1 = f"{root}/STORAGE01"
+    (etc / "exports").write_text(
+        f"{s1}/NFS-01 10.60.60.0/26({EXPORT_OPTS})\n"
+        f"{s1}/NFS-02 10.60.60.0/26({EXPORT_OPTS})\n"
+        f"{s1}/NFS-03 192.168.0.0/26({EXPORT_OPTS}) *({EXPORT_OPTS})\n"
+        f"{s1}/NFS-04 10.60.60.0/26({EXPORT_OPTS})\n"
+        f"{s1}/NFS-05 192.168.0.0/24({EXPORT_OPTS})\n"
+        f"{s1}/NFS-VCD 10.60.60.0/26({EXPORT_OPTS})\n"
+    )
+    (etc / "zboxapi.conf").write_text(
+        "[storage]\n"
+        f"filer_root = {root}\n"
+        f"mount_unit_dir = {etc / 'systemd' / 'system'}\n"
+        "[nfs]\n"
+        f"exports_file = {etc / 'exports.d' / 'zboxapi.exports'}\n"
+        f"system_exports_file = {etc / 'exports'}\n"
+        f"protected_exports = {root}/STORAGE01/NFS-01\n"
+    )
+    monkeypatch.setattr(config, "CONFIG_FILE", etc / "zboxapi.conf")
+    monkeypatch.setattr(system_mod, "AUDIT_LOG", tmp_path / "audit.log")
+    monkeypatch.setattr(system_mod, "LOCK_FILE", tmp_path / "storage.lock")
+    monkeypatch.setattr(system_mod, "SYS_BLOCK", tmp_path / "sys" / "block")
+    monkeypatch.setattr(system_mod, "SYS_SCSI_HOST", tmp_path / "sys" / "scsi_host")
+    return root
+
+
+@pytest.fixture
+def host(filer, system, monkeypatch, tmp_path) -> FakeHost:
+    """zcore as it is today, with subprocess.run routed through the model."""
+    fake = zcore(tmp_path)
+    fake.fallback = system
+    etc = tmp_path / "etc"
+    fake.exports_files = [etc / "exports", etc / "exports.d" / "zboxapi.exports"]
+    fake.reload_exports()
+    monkeypatch.setattr(subprocess, "run", fake.run)
+    return fake
+
+
+@pytest.fixture
 def password(monkeypatch) -> str:
     """Replace the vmtoolsd lookup with a fixed password."""
     monkeypatch.setattr(main, "get_zpod_password", lambda: PASSWORD)
@@ -139,7 +193,7 @@ def password(monkeypatch) -> str:
 
 
 @pytest.fixture
-def anon_client(password, hosts_file, vlan_config, interfaces_dir, system):
+def anon_client(password, hosts_file, vlan_config, interfaces_dir, system, host):
     """TestClient with the app fully sandboxed but no credentials attached."""
     with TestClient(main.app) as client:
         yield client
