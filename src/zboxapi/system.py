@@ -85,13 +85,19 @@ def query(argv: list[str], *, check: bool = True) -> subprocess.CompletedProcess
 
 
 def run(
-    argv: list[str], *, check: bool = True, source: str = ""
+    argv: list[str],
+    *,
+    check: bool = True,
+    input: str | None = None,
+    source: str = "",
 ) -> subprocess.CompletedProcess:
     """Run a command that changes the host: guarded, then logged."""
     from zboxapi import guard  # late import: guard queries the host through this module
 
     guard.assert_argv_allowed(argv)
-    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        argv, capture_output=True, text=True, check=False, input=input
+    )
     audit(argv, result.returncode, source)
     if check and result.returncode != 0:
         raise CommandError(argv, result)

@@ -1,6 +1,6 @@
 """Block device inventory and classification."""
 
-from tests.fake_host import G, T
+from tests.fake_host import Disk, G, T
 from zboxapi.disk import classify
 
 
@@ -64,3 +64,45 @@ def test_classify_is_pure(host):
     states = {d.name: classify(d, ps)[0] for d in nodes}
     assert states == {"sda": "system", "sdb": "protected", "sdc": "blank"}
     assert host.mutating_calls == []
+
+
+# ── rescan ───────────────────────────────────────────────────────────────────────────
+
+
+def test_rescan_finds_new_disks_and_size_changes(client, host):
+    host.hotplug(Disk(name="sdc", size=500 * G, serial="6000c29sdc"))
+    r = client.post("/disk/rescan")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"new": ["sdc"], "resized": [], "skipped": ["sda", "sdb"]}
+    assert client.get("/disk/sdc").json()["state"] == "blank"
+
+    host.resize("sdc", T)
+    r = client.post("/disk/rescan")
+    assert r.json()["new"] == []
+    assert r.json()["resized"] == [
+        {
+            "disk": "sdc",
+            "before": 500 * G,
+            "after": T,
+            "before_human": "500.0G",
+            "after_human": "1.0T",
+            "storage": None,
+        }
+    ]
+    assert client.post("/disk/rescan").json() == {
+        "new": [],
+        "resized": [],
+        "skipped": ["sda", "sdb"],
+    }
+
+
+def test_rescan_never_touches_protected_or_system_disks(client, host, tmp_path):
+    host.resize("sdb", 2 * T)  # grown in vSphere, but sdb is frozen
+    host.resize("sda", 100 * G)
+    r = client.post("/disk/rescan")
+    assert r.json()["resized"] == []
+    assert host.disks["sdb"].rescans == 0 and host.disks["sda"].rescans == 0
+    assert host.disks["sdb"].size == T
+    log = (tmp_path / "audit.log").read_text()
+    assert "block/sdb/" not in log and "block/sda/" not in log
+    assert "scsi_host/host0/scan" in log

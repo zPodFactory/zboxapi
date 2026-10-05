@@ -15,6 +15,16 @@ from pathlib import Path
 
 G = 1024**3
 T = 1024**4
+LVM_COMMANDS = {
+    "pvcreate",
+    "vgcreate",
+    "lvcreate",
+    "pvresize",
+    "lvextend",
+    "pvremove",
+    "vgremove",
+    "lvremove",
+}
 
 
 @dataclass
@@ -66,6 +76,13 @@ class FakeHost:
         self.mutating_calls: list[list[str]] = []
         self.fallback = fallback
         self.fail: set[tuple[str, ...]] = set()
+        self.lvm_installed = True
+        # sysfs: rescan nodes the API writes; the model reacts when it renders lsblk
+        self.sysfs: Path | None = None
+        self.pending_disks: list[Disk] = []  # appear after a SCSI host scan
+        self.pending_sizes: dict[str, int] = {}  # applied after the disk's rescan
+        self.unit_dir: Path | None = None  # where systemctl finds *.mount units
+        self.units_enabled: set[str] = set()
 
     # ── model helpers ──────────────────────────────────────────────────────────
     def add_disk(self, name: str, size: int, **kw) -> Disk:
@@ -73,7 +90,48 @@ class FakeHost:
             name=name, size=size, serial=kw.pop("serial", f"6000c29{name}"), **kw
         )
         self.disks[name] = disk
+        self._sysfs_node(name)
         return disk
+
+    def attach_sysfs(self, root: Path) -> None:
+        """Create /sys/class/block/<disk>/device/rescan and scsi_host/host0/scan."""
+        self.sysfs = root
+        (root / "scsi_host" / "host0").mkdir(parents=True, exist_ok=True)
+        (root / "scsi_host" / "host0" / "scan").write_text("")
+        for name in self.disks:
+            self._sysfs_node(name)
+
+    def _sysfs_node(self, name: str) -> None:
+        if self.sysfs is not None:
+            node = self.sysfs / "block" / name / "device"
+            node.mkdir(parents=True, exist_ok=True)
+            (node / "rescan").write_text("")
+
+    def hotplug(self, disk: Disk) -> None:
+        """A disk attached in vSphere: visible after the next SCSI host scan."""
+        self.pending_disks.append(disk)
+
+    def resize(self, name: str, size: int) -> None:
+        """A disk enlarged in vSphere: visible after the next rescan of that disk."""
+        self.pending_sizes[name] = size
+
+    def _apply_sysfs(self) -> None:
+        if self.sysfs is None:
+            return
+        scan = self.sysfs / "scsi_host" / "host0" / "scan"
+        if scan.exists() and scan.read_text().strip() == "- - -":
+            scan.write_text("")
+            for disk in self.pending_disks:
+                self.disks[disk.name] = disk
+                self._sysfs_node(disk.name)
+            self.pending_disks = []
+        for name, disk in list(self.disks.items()):
+            node = self.sysfs / "block" / name / "device" / "rescan"
+            if node.exists() and node.read_text().strip() == "1":
+                node.write_text("")
+                disk.rescans += 1
+                if name in self.pending_sizes:
+                    disk.size = self.pending_sizes.pop(name)
 
     def add_part(self, disk: str, size: int | None = None, **kw) -> Part:
         d = self.disks[disk]
@@ -118,6 +176,7 @@ class FakeHost:
 
     # ── renderers ──────────────────────────────────────────────────────────────
     def lsblk(self) -> str:
+        self._apply_sysfs()
         devices = []
         for d in self.disks.values():
             parts = []
@@ -204,17 +263,21 @@ class FakeHost:
     def run(self, cmd, **kwargs) -> subprocess.CompletedProcess:
         cmd = list(cmd)
         self.calls.append(cmd)
-        rc, out, err = self._dispatch(cmd)
+        rc, out, err = self._dispatch(cmd, kwargs.get("input"))
         if rc == 127 and self.fallback is not None:
             return self.fallback.run(cmd, **kwargs)
         if kwargs.get("check") and rc != 0:
             raise subprocess.CalledProcessError(rc, cmd, output=out, stderr=err)
         return subprocess.CompletedProcess(cmd, rc, out, err)
 
-    def _dispatch(self, cmd: list[str]) -> tuple[int, str, str]:
+    def _dispatch(  # noqa: C901
+        self, cmd: list[str], stdin: str | None = None
+    ) -> tuple[int, str, str]:
         for prefix in self.fail:
             if tuple(cmd[: len(prefix)]) == prefix:
                 return 1, "", f"fake failure: {' '.join(cmd)}"
+        if cmd[0] in LVM_COMMANDS and not self.lvm_installed:
+            return 127, "", f"{cmd[0]}: command not found"
         match cmd:
             case ["lsblk", *_]:
                 return 0, self.lsblk(), ""
@@ -224,7 +287,159 @@ class FakeHost:
                 self.mutating_calls.append(cmd)
                 self.reload_exports()
                 return 0, "", ""
+            case (
+                ["udevadm", "settle"]
+                | ["partx", "-u", _]
+                | ["systemctl", "daemon-reload"]
+            ):
+                return 0, "", ""
+            case ["sfdisk", *_, path]:
+                return self._sfdisk(cmd, path, stdin or "")
+            case ["wipefs", "-a", path]:
+                return self._wipefs(cmd, path)
+            case ["pvcreate", *_, path]:
+                self.mutating_calls.append(cmd)
+                part = self._part(path.removeprefix("/dev/"))
+                part.fstype = "LVM2_member"
+                return 0, f'Physical volume "{path}" successfully created.', ""
+            case ["pvremove", *_, path]:
+                self.mutating_calls.append(cmd)
+                self._part(path.removeprefix("/dev/")).fstype = None
+                return 0, "", ""
+            case ["vgcreate", vg, path]:
+                self.mutating_calls.append(cmd)
+                self.vgs = getattr(self, "vgs", {})
+                self.vgs[vg] = path.removeprefix("/dev/")
+                return 0, f'Volume group "{vg}" successfully created', ""
+            case ["vgremove", *_, vg]:
+                self.mutating_calls.append(cmd)
+                getattr(self, "vgs", {}).pop(vg, None)
+                return 0, "", ""
+            case ["lvcreate", *_, "-n", lv, vg]:
+                self.mutating_calls.append(cmd)
+                pv = getattr(self, "vgs", {})[vg]
+                part = self._part(pv)
+                self.lvs.append(
+                    LV(vg=vg, name=lv, pv=pv, size=part.size - 4 * 1024**2, fstype=None)
+                )
+                return 0, f'Logical volume "{lv}" created.', ""
+            case ["lvremove", *_, spec]:
+                self.mutating_calls.append(cmd)
+                vg, lv = spec.removeprefix("/dev/").split("/", 1)
+                self.lvs = [x for x in self.lvs if not (x.vg == vg and x.name == lv)]
+                return 0, "", ""
+            case ["mkfs.ext4", *args, path]:
+                return self._mkfs(cmd, args, path)
+            case ["systemctl", "enable", "--now", unit]:
+                return self._mount_unit(cmd, unit, up=True)
+            case ["systemctl", "disable", "--now", unit]:
+                return self._mount_unit(cmd, unit, up=False)
+            case ["growpart", path, number]:
+                return self._growpart(cmd, path, number)
+            case ["pvresize", _]:
+                self.mutating_calls.append(cmd)
+                return 0, "", ""
+            case ["lvextend", "-l", "+100%FREE", spec]:
+                self.mutating_calls.append(cmd)
+                vg, lv = spec.removeprefix("/dev/").split("/", 1)
+                for x in self.lvs:
+                    if x.vg == vg and x.name == lv:
+                        new = self._part(x.pv).size - 4 * 1024**2
+                        if new <= x.size:
+                            return 5, "", "New size (in extents) matches existing size."
+                        x.size = new
+                return 0, "", ""
+            case ["resize2fs", _]:
+                self.mutating_calls.append(cmd)
+                return 0, "", ""
         return 127, "", f"unknown command: {cmd}"
+
+    # ── phase 3 command models ─────────────────────────────────────────────────
+    def _node(self, path: str):
+        name = path.removeprefix("/dev/")
+        if name.startswith("mapper/"):
+            dm = name.removeprefix("mapper/")
+            return next(lv for lv in self.lvs if lv.dm_name == dm)
+        if name in self.disks:
+            return self.disks[name]
+        if "/" in name:
+            vg, lv = name.split("/", 1)
+            return next(x for x in self.lvs if x.vg == vg and x.name == lv)
+        return self._part(name)
+
+    def _sfdisk(self, cmd, path, script):
+        self.mutating_calls.append(cmd)
+        disk = self.disks[path.removeprefix("/dev/")]
+        if disk.parts or disk.pttype:
+            return 1, "", f"{path}: already has a partition table"
+        assert "label: gpt" in script
+        kind = "lvm" if ",,lvm" in script else "linux"
+        disk.pttype = "gpt"
+        disk.parts.append(
+            Part(
+                name=f"{disk.name}1",
+                size=disk.size - 2 * 1024**2,
+                parttype="e6d6d379-f507-44c2-a23c-238f2a3df928"
+                if kind == "lvm"
+                else "0fc63daf-8483-4772-8e79-3d69d8477de4",
+            )
+        )
+        return 0, "", ""
+
+    def _wipefs(self, cmd, path):
+        self.mutating_calls.append(cmd)
+        node = self._node(path)
+        if isinstance(node, Disk):
+            node.pttype, node.fstype, node.parts = None, None, []
+        else:
+            node.fstype, node.label, node.uuid = None, None, None
+        return 0, "", ""
+
+    def _mkfs(self, cmd, args, path):
+        self.mutating_calls.append(cmd)
+        node = self._node(path)
+        node.fstype = "ext4"
+        node.label = args[args.index("-L") + 1] if "-L" in args else None
+        node.uuid = args[args.index("-U") + 1] if "-U" in args else f"uuid-{path}"
+        return 0, f"Creating filesystem with {node.size // 4096} 4k blocks", ""
+
+    def _mount_unit(self, cmd, unit, up):
+        self.mutating_calls.append(cmd)
+        path = (self.unit_dir or Path(".")) / unit
+        if not path.is_file():
+            return 1, "", f"Failed to enable unit: Unit file {unit} does not exist."
+        text = path.read_text()
+        uuid = text.split("What=UUID=", 1)[1].splitlines()[0].strip()
+        where = text.split("Where=", 1)[1].splitlines()[0].strip()
+        target = next(
+            (n for d in self.disks.values() for n in d.parts if n.uuid == uuid), None
+        ) or next((lv for lv in self.lvs if lv.uuid == uuid), None)
+        if target is None:
+            return 1, "", f"mount: can't find UUID={uuid}"
+        target.mountpoint = where if up else None
+        (self.units_enabled.add if up else self.units_enabled.discard)(unit)
+        return 0, "", ""
+
+    def _growpart(self, cmd, path, number):
+        self.mutating_calls.append(cmd)
+        disk = self.disks[path.removeprefix("/dev/")]
+        part = disk.parts[int(number) - 1]
+        new = disk.size - 2 * 1024**2
+        if new <= part.size:
+            return (
+                1,
+                f"NOCHANGE: partition {number} is size {part.size // 512}. "
+                "it cannot be grown",
+                "",
+            )
+        old = part.size
+        part.size = new
+        return (
+            0,
+            f"CHANGED: partition={number} start=2048 "
+            f"old: size={old // 512} new: size={new // 512}",
+            "",
+        )
 
 
 def zcore(tmp_path: Path) -> FakeHost:

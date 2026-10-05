@@ -40,6 +40,18 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `PUT /storage/{name}/folder/{folder}` applies chown and/or chmod, recursively on request;
   `DELETE` removes a folder only when it is empty and not exported. NFS-01 answers 403 to
   all three; other folders on STORAGE01 are manageable, as decided.
+- **Disks and storages (phase 3).** `POST /disk/rescan` detects new disks and size changes,
+  never touching the protected or system disks. `POST /storage` turns a blank disk into a
+  mounted `/FILER/STORAGEnn` (GPT with one partition via sfdisk, optional one-VG-per-disk LVM,
+  ext4, a systemd mount unit per storage); `POST /storage/adopt` mounts an existing ext4 the
+  same way without formatting; `POST /storage/{name}/grow` extends partition, PV, LV and
+  filesystem online after a vSphere resize, and is a no-op when nothing grew;
+  `DELETE /storage/{name}` unmounts a storage that has no exports and leaves the filesystem
+  and disk intact. Every one of them takes `?dry_run=true` (the plan, nothing runs) and
+  `?verbose=true` (the exact command and output per step). Responses describe steps in
+  storage terms (`step`, `target`, `detail`, `status`); a failed create is rolled back to a
+  blank disk and the response lists what was undone. `lvm: true` answers 400 until lvm2 is
+  installed.
 - **The system disk is protected too.** Whatever holds `/`, `/boot` or swap joins the
   protected set as devices (its partitions and LVM included), so the command runner
   refuses it like the STORAGE01 disk. Growing it remains `zbox-init --extend-disk`'s job.

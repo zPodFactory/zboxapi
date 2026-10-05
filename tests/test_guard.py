@@ -2,6 +2,7 @@
 
 import pytest
 
+from tests.conftest import ME
 from tests.fake_host import G, T
 from zboxapi import guard, system
 
@@ -173,3 +174,98 @@ def test_sizes_are_what_duf_prints():
     assert system.human_size(1006_9 * 1024**3 // 10) == "1006.9G"
     assert system.human_size(28 * 1024) == "28.0K"
     assert system.human_size(512) == "512B"
+
+
+# ── the protection matrix: every mutating endpoint against every protected target ──
+
+
+@pytest.mark.parametrize(
+    "method, path, body",
+    [
+        ("POST", "/storage", {"disk": "sdb"}),
+        ("POST", "/storage", {"disk": "sda"}),
+        ("POST", "/storage/adopt", {"device": "sdb1"}),
+        ("POST", "/storage/adopt", {"device": "sda1"}),
+        ("POST", "/storage/STORAGE01/grow", None),
+        ("DELETE", "/storage/STORAGE01", None),
+        ("POST", "/storage/STORAGE01/folder", {"name": "NFS-01"}),
+        ("PUT", "/storage/STORAGE01/folder/NFS-01", {"mode": "0755"}),
+        ("DELETE", "/storage/STORAGE01/folder/NFS-01", None),
+    ],
+)
+def test_matrix_protected_targets_get_403_and_nothing_runs(
+    client, host, filer, method, path, body
+):
+    before = host.snapshot("sdb"), host.snapshot("sda")
+    nfs01 = sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
+    r = client.request(method, path, json=body)
+    assert r.status_code == 403, (method, path, r.text)
+    assert host.mutating_calls == []
+    assert (host.snapshot("sdb"), host.snapshot("sda")) == before
+    assert sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*")) == nfs01
+    assert host.disks["sdb"].rescans == 0 and host.disks["sda"].rescans == 0
+
+
+def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_path):
+    """A few hundred valid and invalid calls in random order: sdb, /etc/exports and
+    NFS-01 end exactly as they started."""
+    import random
+
+    from tests.fake_host import Disk
+
+    rng = random.Random(4)
+    etc = tmp_path / "etc"
+    seed_sdb = host.snapshot("sdb")
+    seed_exports = (etc / "exports").read_text()
+    seed_nfs01 = sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
+    host.hotplug(Disk(name="sdc", size=500 * G, serial="c"))
+    host.hotplug(Disk(name="sdd", size=T, serial="d"))
+
+    actions = [
+        lambda: client.post("/disk/rescan"),
+        lambda: client.post(
+            "/storage",
+            json={
+                "disk": rng.choice(["sda", "sdb", "sdc", "sdd", "sdz"]),
+                "lvm": rng.random() < 0.5,
+            },
+        ),
+        lambda: client.post(
+            "/storage/adopt",
+            json={"device": rng.choice(["sdb1", "sda1", "sdc1", "sdd1"])},
+        ),
+        lambda: client.post(
+            f"/storage/{rng.choice(['STORAGE01', 'STORAGE02', 'STORAGE03'])}/grow"
+        ),
+        lambda: client.delete(
+            f"/storage/{rng.choice(['STORAGE01', 'STORAGE02', 'STORAGE03'])}"
+        ),
+        lambda: client.post(
+            f"/storage/{rng.choice(['STORAGE01', 'STORAGE02'])}/folder",
+            json={
+                "name": rng.choice(["NFS-01", "NFS-06", "x"]),
+                "owner": ME,
+                "mode": "0777",
+            },
+        ),
+        lambda: client.put(
+            f"/storage/STORAGE01/folder/{rng.choice(['NFS-01', 'NFS-02'])}",
+            json={"mode": "0700", "recursive": True},
+        ),
+        lambda: client.delete(
+            f"/storage/STORAGE01/folder/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06'])}"
+        ),
+        lambda: (host.resize(rng.choice(["sdb", "sdc", "sdd"]), 2 * T), None)[1],
+    ]
+    for _ in range(300):
+        rng.choice(actions)()
+    assert host.snapshot("sdb") == seed_sdb
+    assert (etc / "exports").read_text() == seed_exports
+    assert (
+        sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
+        == seed_nfs01
+    )
+    assert host.disks["sdb"].rescans == 0
+    assert not any(
+        "sdb" in " ".join(c) or "sda" in " ".join(c) for c in host.mutating_calls
+    )

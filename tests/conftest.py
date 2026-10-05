@@ -1,6 +1,9 @@
 """Shared fixtures: temp hosts/config paths, a fake command runner, and an
 authenticated TestClient. No test touches /etc or runs real system commands."""
 
+import grp
+import os
+import pwd
 import subprocess
 
 import pytest
@@ -9,11 +12,13 @@ from fastapi.testclient import TestClient
 import zboxapi.config as config
 import zboxapi.dns as dns
 import zboxapi.main as main
+import zboxapi.storage as storage
 import zboxapi.system as system_mod
 import zboxapi.vlan as vlan
 from tests.fake_host import FakeHost, zcore
 
 PASSWORD = "s3cret-zpod-password"
+ME = f"{pwd.getpwuid(os.getuid()).pw_name}:{grp.getgrgid(os.getgid()).gr_name}"
 EXPORT_OPTS = "rw,sync,no_subtree_check,no_root_squash"
 
 CONFIG_TEXT = """[DEFAULT]
@@ -181,7 +186,10 @@ def host(filer, system, monkeypatch, tmp_path) -> FakeHost:
     etc = tmp_path / "etc"
     fake.exports_files = [etc / "exports", etc / "exports.d" / "zboxapi.exports"]
     fake.reload_exports()
+    fake.attach_sysfs(tmp_path / "sys")
+    fake.unit_dir = etc / "systemd" / "system"
     monkeypatch.setattr(subprocess, "run", fake.run)
+    monkeypatch.setattr(storage, "lvm_available", lambda: fake.lvm_installed)
     return fake
 
 

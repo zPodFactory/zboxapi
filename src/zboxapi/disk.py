@@ -138,3 +138,74 @@ def disk_get(name: str) -> DiskView:
         if disk.name == name:
             return disk
     raise HTTPException(status.HTTP_404_NOT_FOUND, f"Disk {name} not found")
+
+
+# ── rescan ───────────────────────────────────────────────────────────────────────────
+
+
+class ResizedDisk(BaseModel):
+    disk: str
+    before: int
+    after: int
+    before_human: str
+    after_human: str
+    storage: str | None
+
+
+class RescanResult(BaseModel):
+    new: list[str]
+    resized: list[ResizedDisk]
+    skipped: list[str]  # protected and system disks: their rescan node is never written
+
+
+def find_disk(name: str, nodes: list[system.BlockNode]) -> system.BlockNode | None:
+    for disk in nodes:
+        if disk.type == "disk" and disk.name == name:
+            return disk
+    return None
+
+
+def rescan() -> RescanResult:
+    """SCSI host scan for new disks, then a size rescan of every non-protected disk."""
+    before = {d.name: d for d in system.block_devices() if d.type == "disk"}
+    ps = guard.protected_set(list(before.values()))
+
+    for host_scan in sorted(system.SYS_SCSI_HOST.glob("host*/scan")):
+        system.write_sysfs(host_scan, "- - -\n", source="disk_rescan")
+
+    skipped = []
+    for name in sorted(before):
+        if name in ps.devices:
+            skipped.append(name)
+            continue
+        node = system.SYS_BLOCK / name / "device" / "rescan"
+        if node.exists():
+            system.write_sysfs(node, "1\n", source="disk_rescan")
+
+    after = {d.name: d for d in system.block_devices() if d.type == "disk"}
+    return RescanResult(
+        new=sorted(set(after) - set(before)),
+        resized=[
+            ResizedDisk(
+                disk=name,
+                before=before[name].size,
+                after=after[name].size,
+                before_human=system.human_size(before[name].size),
+                after_human=system.human_size(after[name].size),
+                storage=_storage_in(after[name]),
+            )
+            for name in sorted(before)
+            if name in after and after[name].size != before[name].size
+        ],
+        skipped=skipped,
+    )
+
+
+@disk_router.post("/rescan", response_model=RescanResult)
+def disk_rescan() -> RescanResult:
+    """Detect new disks and size changes. Protected and system disks are left alone."""
+    try:
+        with system.storage_lock():
+            return rescan()
+    except (system.CommandError, OSError) as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
