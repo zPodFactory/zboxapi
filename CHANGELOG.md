@@ -38,8 +38,9 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 - **Folders (phase 2).** `POST /storage/{name}/folder` creates a top-level folder with an
   owner (`user:group`) and an octal mode, defaulting to the config values;
   `PUT /storage/{name}/folder/{folder}` applies chown and/or chmod, recursively on request;
-  `DELETE` removes a folder only when it is empty and not exported. NFS-01 answers 403 to
-  all three; other folders on STORAGE01 are manageable, as decided.
+  `DELETE` removes a folder when it is empty and not exported, or with everything in it
+  when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
+  answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
 - **Disks and storages (phase 3).** `POST /disk/rescan` detects new disks and size changes,
   never touching the protected or system disks. `POST /storage` turns a blank disk into a
   mounted `/FILER/STORAGEnn` (GPT with one partition via sfdisk, optional one-VG-per-disk LVM,

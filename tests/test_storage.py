@@ -217,8 +217,55 @@ def test_folder_delete(client, host, filer, tmp_path):
     assert r.status_code == 404
     r = client.delete("/storage/STORAGE01/folder/empty")
     assert r.status_code == 200
+    assert r.json() == {
+        "message": f"Folder {filer / 'STORAGE01' / 'empty'} deleted",
+        "path": str(filer / "STORAGE01" / "empty"),
+        "removed": 1,
+        "forced": False,
+    }
     assert not (filer / "STORAGE01" / "empty").exists()
     assert (filer / "STORAGE01" / "full" / "f").exists()
+    assert (
+        "pass force=true"
+        in client.delete("/storage/STORAGE01/folder/full").json()["detail"]
+    )
+
+
+def test_folder_delete_force_removes_contents(client, host, filer, tmp_path):
+    base = filer / "STORAGE01" / "NFS-02"
+    (base / "vm-a").mkdir()
+    (base / "vm-a" / "disk.vmdk").write_text("x" * 100)
+    (base / "vm-a" / "nested").mkdir()
+    (base / "vm-a" / "nested" / "log").write_text("y")
+    (base / "iso.img").write_text("z")
+    (base / "link-out").symlink_to(
+        filer / "STORAGE01" / "NFS-01"
+    )  # must not be followed
+    nfs01_before = sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
+    (tmp_path / "etc" / "exports").write_text("")  # NFS-02 is not exported in this test
+    host.reload_exports()
+
+    r = client.delete("/storage/STORAGE01/folder/NFS-02?force=true")
+    assert r.status_code == 200, r.text
+    assert r.json()["forced"] is True and r.json()["removed"] == 7
+    assert "with 6 entries" in r.json()["message"]
+    assert not base.exists()
+    assert (
+        sorted(str(p) for p in (filer / "STORAGE01" / "NFS-01").rglob("*"))
+        == nfs01_before
+    )
+    assert "rm -rf" in (tmp_path / "audit.log").read_text()
+
+
+def test_folder_delete_force_still_refuses_exported_and_protected(client, host, filer):
+    r = client.delete("/storage/STORAGE01/folder/NFS-02?force=true")
+    assert r.status_code == 409
+    assert "force does not override this" in r.json()["detail"]
+    assert (filer / "STORAGE01" / "NFS-02").is_dir()
+
+    r = client.delete("/storage/STORAGE01/folder/NFS-01?force=true")
+    assert r.status_code == 403
+    assert (filer / "STORAGE01" / "NFS-01" / "vm-esx01" / "esx01.vmdk").exists()
 
 
 @pytest.mark.parametrize(

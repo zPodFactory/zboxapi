@@ -393,9 +393,23 @@ def storage_folder_update(
     return folder_view_of(storage, folder)
 
 
-@storage_router.delete("/{name}/folder/{folder}")
-def storage_folder_delete(name: str, folder: FOLDER_NAME) -> dict:
-    """Delete an empty, unexported folder"""
+class FolderDeleted(BaseModel):
+    message: str
+    path: str
+    removed: int  # files and directories removed, the folder itself included
+    forced: bool
+
+
+def tree_size(path: Path) -> int:
+    """How many files and directories a recursive delete would remove, root included."""
+    return 1 + sum(1 for _ in path.rglob("*"))
+
+
+@storage_router.delete("/{name}/folder/{folder}", response_model=FolderDeleted)
+def storage_folder_delete(
+    name: str, folder: FOLDER_NAME, force: bool = False
+) -> FolderDeleted:
+    """Delete an unexported folder: empty, or with everything in it when force=true"""
     from zboxapi.nfs import export_paths
 
     storage, path = protected_or_404(name, folder)
@@ -404,17 +418,40 @@ def storage_folder_delete(name: str, folder: FOLDER_NAME) -> dict:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {folder} not found")
         if str(path) in export_paths():
             raise HTTPException(
-                status.HTTP_409_CONFLICT, f"{path} is exported; delete the export first"
+                status.HTTP_409_CONFLICT,
+                f"{path} is exported; delete the export first"
+                + (" (force does not override this)" if force else ""),
             )
         entries = sum(1 for _ in path.iterdir())
-        if entries:
+        if entries and not force:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
-                f"{path} is not empty ({entries} entr{'y' if entries == 1 else 'ies'})",
+                f"{path} is not empty "
+                f"({entries} entr{'y' if entries == 1 else 'ies'}); "
+                "pass force=true to delete it with its contents",
             )
-        path.rmdir()
-        system.audit(["rmdir", str(path)], 0, "folder_delete")
-    return {"message": f"Folder {path} deleted"}
+        removed = tree_size(path) if force else 1
+        try:
+            if force:
+                shutil.rmtree(path)
+            else:
+                path.rmdir()
+        except OSError as e:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to delete {path}: {e}"
+            ) from e
+        system.audit(
+            ["rm", "-rf" if force else "-d", str(path), f"removed={removed}"],
+            0,
+            "folder_delete",
+        )
+    return FolderDeleted(
+        message=f"Folder {path} deleted"
+        + (f" with {removed - 1} entries" if force else ""),
+        path=str(path),
+        removed=removed,
+        forced=force,
+    )
 
 
 # ── storage lifecycle: create, adopt, grow, delete ───────────────────────────────────
