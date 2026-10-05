@@ -20,7 +20,17 @@ def test_storage_list_shows_storage01(client, host, filer):
     assert s["protected"] is True
     assert s["managed"] is False  # mounted by hand (fstab), no unit file
     assert s["exports"] == 6
-    assert s["folders"] == 6
+    assert [f["name"] for f in s["folders"]] == [
+        "NFS-01",
+        "NFS-02",
+        "NFS-03",
+        "NFS-04",
+        "NFS-05",
+        "NFS-VCD",
+    ]
+    assert (
+        s["folders"][0]["protected"] is True and s["folders"][1]["protected"] is False
+    )
     assert s["size"] > 0 and s["size_human"].endswith(("G", "T", "M"))
 
 
@@ -69,9 +79,9 @@ def test_storage_get_404(client, host):
 def test_storage_folders(client, host, filer):
     (filer / "STORAGE01" / "scratch").mkdir()
     (filer / "STORAGE01" / "a-file.txt").write_text("not a folder")
-    r = client.get("/storage/STORAGE01/folder")
+    r = client.get("/storage/STORAGE01")
     assert r.status_code == 200
-    by = {f["name"]: f for f in r.json()}
+    by = {f["name"]: f for f in r.json()["folders"]}
     assert set(by) == {
         "NFS-01",
         "NFS-02",
@@ -95,12 +105,13 @@ def test_folder_create_with_defaults_from_config(client, host, filer, tmp_path):
     # defaults: folder_owner root:root would fail as non-root, so point config at us
     conf = tmp_path / "etc" / "zboxapi.conf"
     conf.write_text(conf.read_text() + f"folder_owner = {ME}\nfolder_mode = 0775\n")
-    r = client.post("/storage/STORAGE01/folder", json={"name": "NFS-06"})
+    r = client.post("/storage/STORAGE01/NFS-06")
     assert r.status_code == 200, r.text
     assert r.json() == {
         "name": "NFS-06",
         "path": str(filer / "STORAGE01" / "NFS-06"),
         "exported": False,
+        "protected": False,
         "empty": True,
         "mode": "0775",
         "owner": ME,
@@ -111,8 +122,8 @@ def test_folder_create_with_defaults_from_config(client, host, filer, tmp_path):
 
 def test_folder_create_with_explicit_owner_and_mode(client, host, filer):
     r = client.post(
-        "/storage/STORAGE01/folder",
-        json={"name": "scratch", "owner": ME, "mode": "750"},
+        "/storage/STORAGE01/scratch",
+        json={"owner": ME, "mode": "750"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["mode"] == "0750" and r.json()["owner"] == ME
@@ -122,63 +133,74 @@ def test_folder_create_with_explicit_owner_and_mode(client, host, filer):
 def test_folder_create_accepts_numeric_owner(client, host, filer):
     owner = f"{os.getuid()}:{os.getgid()}"
     r = client.post(
-        "/storage/STORAGE01/folder",
-        json={"name": "num", "owner": owner, "mode": "0700"},
+        "/storage/STORAGE01/num",
+        json={"owner": owner, "mode": "0700"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["owner"] == ME  # reported back as names
 
 
 @pytest.mark.parametrize(
-    "payload, message",
+    "folder, payload, message",
     [
-        ({"name": "../escape"}, "Invalid folder name"),
-        ({"name": "a/b"}, "Invalid folder name"),
-        ({"name": ".."}, "Invalid folder name"),
-        ({"name": "-leading"}, "Invalid folder name"),
-        ({"name": "x" * 64}, "Invalid folder name"),
-        ({"name": "ok", "owner": "nobody-such-user-zz:root"}, "Unknown user"),
-        ({"name": "ok", "owner": "root:no-such-group-zz"}, "Unknown group"),
-        ({"name": "ok", "owner": "root"}, "use user:group"),
-        ({"name": "ok", "mode": "0999"}, "Invalid mode"),
-        ({"name": "ok", "mode": "rwx"}, "Invalid mode"),
+        ("-leading", {}, "Invalid folder name"),
+        ("x" * 64, {}, "Invalid folder name"),
+        ("ok", {"owner": "nobody-such-user-zz:root"}, "Unknown user"),
+        ("ok", {"owner": "root:no-such-group-zz"}, "Unknown group"),
+        ("ok", {"owner": "root"}, "use user:group"),
+        ("ok", {"mode": "0999"}, "Invalid mode"),
+        ("ok", {"mode": "rwx"}, "Invalid mode"),
     ],
 )
-def test_folder_create_rejects_bad_input(client, host, filer, payload, message):
-    r = client.post("/storage/STORAGE01/folder", json=payload)
-    assert r.status_code == 422
+def test_folder_create_rejects_bad_input(client, host, filer, folder, payload, message):
+    r = client.post(f"/storage/STORAGE01/{folder}", json=payload)
+    assert r.status_code == 422, r.text
     assert message in r.text
-    if payload["name"] != "..":
-        assert not (filer / "STORAGE01" / payload["name"]).exists()
+    assert not (filer / "STORAGE01" / folder).exists()
+
+
+def test_reserved_folder_names(client, host, filer):
+    # POST /storage/{name}/grow is the grow endpoint, so a folder called grow can
+    # never be created; PUT and DELETE have no such sibling and must refuse the name.
+    assert client.post("/storage/STORAGE01/grow").status_code == 403  # grow, protected
+    for name in ("grow", "adopt", "folder"):
+        r = client.put(f"/storage/STORAGE01/{name}", json={"mode": "0777"})
+        assert r.status_code == 422 and "reserved name" in r.text
+        r = client.delete(f"/storage/STORAGE01/{name}")
+        assert r.status_code == 422 and "reserved name" in r.text
+        assert not (filer / "STORAGE01" / name).exists()
+
+
+def test_folder_names_with_separators_never_reach_the_endpoint(client, host, filer):
+    assert client.post("/storage/STORAGE01/a/b", json={}).status_code == 404
+    assert client.post("/storage/STORAGE01/..", json={}).status_code in (404, 405, 422)
+    assert not (filer / "STORAGE01" / "a").exists()
 
 
 def test_folder_create_conflicts_and_404(client, host, filer):
-    r = client.post("/storage/STORAGE01/folder", json={"name": "NFS-02", "owner": ME})
+    r = client.post("/storage/STORAGE01/NFS-02", json={"owner": ME})
     assert r.status_code == 409
-    r = client.post("/storage/STORAGE09/folder", json={"name": "x", "owner": ME})
+    r = client.post("/storage/STORAGE09/x", json={"owner": ME})
     assert r.status_code == 404
 
 
 def test_folder_update_chmod_and_chown(client, host, filer, tmp_path):
     target = filer / "STORAGE01" / "NFS-02"
-    r = client.put("/storage/STORAGE01/folder/NFS-02", json={"mode": "0755"})
+    r = client.put("/storage/STORAGE01/NFS-02", json={"mode": "0755"})
     assert r.status_code == 200, r.text
     assert r.json()["mode"] == "0755"
     assert oct(target.stat().st_mode & 0o7777) == "0o755"
 
-    r = client.put(
-        "/storage/STORAGE01/folder/NFS-02", json={"owner": ME, "mode": "777"}
-    )
+    r = client.put("/storage/STORAGE01/NFS-02", json={"owner": ME, "mode": "777"})
     assert r.status_code == 200
     assert r.json()["owner"] == ME and r.json()["mode"] == "0777"
 
-    r = client.put("/storage/STORAGE01/folder/NFS-02", json={})
+    r = client.put("/storage/STORAGE01/NFS-02", json={})
     assert r.status_code == 422
     assert "owner, a mode, or both" in r.text
 
     assert (
-        client.put("/storage/STORAGE01/folder/nope", json={"mode": "0755"}).status_code
-        == 404
+        client.put("/storage/STORAGE01/nope", json={"mode": "0755"}).status_code == 404
     )
 
 
@@ -189,12 +211,12 @@ def test_folder_update_recursive_reaches_children(client, host, filer):
     (base / "vm-a" / "disk.vmdk").chmod(0o600)
     (base / "vm-a").chmod(0o700)
 
-    r = client.put("/storage/STORAGE01/folder/NFS-02", json={"mode": "0770"})
+    r = client.put("/storage/STORAGE01/NFS-02", json={"mode": "0770"})
     assert r.status_code == 200
     assert oct((base / "vm-a").stat().st_mode & 0o7777) == "0o700"  # not recursive
 
     r = client.put(
-        "/storage/STORAGE01/folder/NFS-02", json={"mode": "0770", "recursive": True}
+        "/storage/STORAGE01/NFS-02", json={"mode": "0770", "recursive": True}
     )
     assert r.status_code == 200
     assert oct((base / "vm-a").stat().st_mode & 0o7777) == "0o770"
@@ -209,13 +231,13 @@ def test_folder_delete(client, host, filer, tmp_path):
     (filer / "STORAGE01" / "exported").mkdir()
     managed.write_text(f"{filer}/STORAGE01/exported *(rw)\n")
 
-    r = client.delete("/storage/STORAGE01/folder/full")
+    r = client.delete("/storage/STORAGE01/full")
     assert r.status_code == 409 and "not empty (1 entry)" in r.json()["detail"]
-    r = client.delete("/storage/STORAGE01/folder/exported")
+    r = client.delete("/storage/STORAGE01/exported")
     assert r.status_code == 409 and "exported" in r.json()["detail"]
-    r = client.delete("/storage/STORAGE01/folder/missing")
+    r = client.delete("/storage/STORAGE01/missing")
     assert r.status_code == 404
-    r = client.delete("/storage/STORAGE01/folder/empty")
+    r = client.delete("/storage/STORAGE01/empty")
     assert r.status_code == 200
     assert r.json() == {
         "message": f"Folder {filer / 'STORAGE01' / 'empty'} deleted",
@@ -226,8 +248,7 @@ def test_folder_delete(client, host, filer, tmp_path):
     assert not (filer / "STORAGE01" / "empty").exists()
     assert (filer / "STORAGE01" / "full" / "f").exists()
     assert (
-        "pass force=true"
-        in client.delete("/storage/STORAGE01/folder/full").json()["detail"]
+        "pass force=true" in client.delete("/storage/STORAGE01/full").json()["detail"]
     )
 
 
@@ -245,7 +266,7 @@ def test_folder_delete_force_removes_contents(client, host, filer, tmp_path):
     (tmp_path / "etc" / "exports").write_text("")  # NFS-02 is not exported in this test
     host.reload_exports()
 
-    r = client.delete("/storage/STORAGE01/folder/NFS-02?force=true")
+    r = client.delete("/storage/STORAGE01/NFS-02?force=true")
     assert r.status_code == 200, r.text
     assert r.json()["forced"] is True and r.json()["removed"] == 7
     assert "with 6 entries" in r.json()["message"]
@@ -258,12 +279,12 @@ def test_folder_delete_force_removes_contents(client, host, filer, tmp_path):
 
 
 def test_folder_delete_force_still_refuses_exported_and_protected(client, host, filer):
-    r = client.delete("/storage/STORAGE01/folder/NFS-02?force=true")
+    r = client.delete("/storage/STORAGE01/NFS-02?force=true")
     assert r.status_code == 409
     assert "force does not override this" in r.json()["detail"]
     assert (filer / "STORAGE01" / "NFS-02").is_dir()
 
-    r = client.delete("/storage/STORAGE01/folder/NFS-01?force=true")
+    r = client.delete("/storage/STORAGE01/NFS-01?force=true")
     assert r.status_code == 403
     assert (filer / "STORAGE01" / "NFS-01" / "vm-esx01" / "esx01.vmdk").exists()
 
@@ -271,14 +292,14 @@ def test_folder_delete_force_still_refuses_exported_and_protected(client, host, 
 @pytest.mark.parametrize(
     "method, path, body",
     [
-        ("POST", "/storage/STORAGE01/folder", {"name": "NFS-01"}),
-        ("PUT", "/storage/STORAGE01/folder/NFS-01", {"mode": "0777"}),
+        ("POST", "/storage/STORAGE01/NFS-01", {}),
+        ("PUT", "/storage/STORAGE01/NFS-01", {"mode": "0777"}),
         (
             "PUT",
-            "/storage/STORAGE01/folder/NFS-01",
+            "/storage/STORAGE01/NFS-01",
             {"owner": "root:root", "recursive": True},
         ),
-        ("DELETE", "/storage/STORAGE01/folder/NFS-01", None),
+        ("DELETE", "/storage/STORAGE01/NFS-01", None),
     ],
 )
 def test_folder_endpoints_refuse_nfs01(client, host, filer, method, path, body):
@@ -667,8 +688,8 @@ def test_full_lifecycle_add_export_grow_remove(client, host, filer, tmp_path):
     assert client.post("/disk/rescan").json()["new"] == ["sdc"]
     assert client.post("/storage", json={"disk": "sdc", "lvm": True}).status_code == 200
     r = client.post(
-        "/storage/STORAGE02/folder",
-        json={"name": "NFS-15", "owner": ME, "mode": "0777"},
+        "/storage/STORAGE02/NFS-15",
+        json={"owner": ME, "mode": "0777"},
     )
     assert r.status_code == 200, r.text
     host.resize("sdc", T)
@@ -676,9 +697,10 @@ def test_full_lifecycle_add_export_grow_remove(client, host, filer, tmp_path):
     assert client.post("/storage/STORAGE02/grow").json()["changed"] is True
     listing = {s["name"]: s for s in client.get("/storage").json()}
     assert (
-        listing["STORAGE02"]["folders"] == 1 and listing["STORAGE02"]["layout"] == "lvm"
+        len(listing["STORAGE02"]["folders"]) == 1
+        and listing["STORAGE02"]["layout"] == "lvm"
     )
-    assert client.delete("/storage/STORAGE02/folder/NFS-15").status_code == 200
+    assert client.delete("/storage/STORAGE02/NFS-15").status_code == 200
     assert client.delete("/storage/STORAGE02").json()["disk_state"] == "foreign"
     assert [s["name"] for s in client.get("/storage").json()] == ["STORAGE01"]
     # the protected disk never saw a single command

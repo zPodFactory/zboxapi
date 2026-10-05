@@ -188,10 +188,10 @@ def test_sizes_are_what_duf_prints():
         ("POST", "/storage/adopt", {"device": "sda1"}),
         ("POST", "/storage/STORAGE01/grow", None),
         ("DELETE", "/storage/STORAGE01", None),
-        ("POST", "/storage/STORAGE01/folder", {"name": "NFS-01"}),
-        ("PUT", "/storage/STORAGE01/folder/NFS-01", {"mode": "0755"}),
-        ("DELETE", "/storage/STORAGE01/folder/NFS-01", None),
-        ("DELETE", "/storage/STORAGE01/folder/NFS-01?force=true", None),
+        ("POST", "/storage/STORAGE01/NFS-01", {}),
+        ("PUT", "/storage/STORAGE01/NFS-01", {"mode": "0755"}),
+        ("DELETE", "/storage/STORAGE01/NFS-01", None),
+        ("DELETE", "/storage/STORAGE01/NFS-01?force=true", None),
     ],
 )
 def test_matrix_protected_targets_get_403_and_nothing_runs(
@@ -250,11 +250,11 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
             },
         ),
         lambda: client.put(
-            f"/storage/STORAGE01/folder/{rng.choice(['NFS-01', 'NFS-02'])}",
+            f"/storage/STORAGE01/{rng.choice(['NFS-01', 'NFS-02'])}",
             json={"mode": "0700", "recursive": True},
         ),
         lambda: client.delete(
-            f"/storage/STORAGE01/folder/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06'])}"
+            f"/storage/STORAGE01/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06'])}"
             f"?force={rng.choice(['true', 'false'])}"
         ),
         lambda: (host.resize(rng.choice(["sdb", "sdc", "sdd"]), 2 * T), None)[1],

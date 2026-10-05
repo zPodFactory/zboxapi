@@ -40,13 +40,14 @@ class StorageView(BaseModel):
     protected: bool
     managed: bool
     exports: int
-    folders: int
+    folders: list[FolderView]
 
 
 class FolderView(BaseModel):
     name: str
     path: str
     exported: bool
+    protected: bool
     empty: bool
     mode: str
     owner: str
@@ -102,6 +103,7 @@ def storage_view(
     name = storage_name_of(node) or ""
     size, used, avail = usage(node.mountpoint or "")
     return StorageView(
+        folders=folder_views(node.mountpoint or "", ps, export_paths),
         name=name,
         mountpoint=node.mountpoint or "",
         disk=node.disk.name,
@@ -120,7 +122,6 @@ def storage_view(
         protected=name in ps.storages,
         managed=mount_unit_path(name).is_file(),
         exports=sum(1 for p in export_paths if p.startswith(node.mountpoint + "/")),
-        folders=len(folders_in(node.mountpoint or "")),
     )
 
 
@@ -146,27 +147,24 @@ def get_storage(name: str) -> StorageView:
     raise HTTPException(status.HTTP_404_NOT_FOUND, f"Storage {name} not found")
 
 
-def folder_views(storage: StorageView) -> list[FolderView]:
-    from zboxapi.nfs import export_paths
-
-    paths = export_paths()
+def folder_views(
+    mountpoint: str, ps: guard.ProtectedSet, paths: set[str]
+) -> list[FolderView]:
     out = []
-    for folder in folders_in(storage.mountpoint):
+    for folder in folders_in(mountpoint):
         st = folder.stat()
         try:
-            import grp
-            import pwd
-
             owner = (
                 f"{pwd.getpwuid(st.st_uid).pw_name}:{grp.getgrgid(st.st_gid).gr_name}"
             )
-        except KeyError, ImportError:
+        except KeyError:
             owner = f"{st.st_uid}:{st.st_gid}"
         out.append(
             FolderView(
                 name=folder.name,
                 path=str(folder),
                 exported=str(folder) in paths,
+                protected=ps.reason_for(str(folder)) is not None,
                 empty=not any(folder.iterdir()),
                 mode=f"{st.st_mode & 0o7777:04o}",
                 owner=owner,
@@ -192,266 +190,6 @@ def storage_get_all() -> list[StorageView]:
 def storage_get(name: str) -> StorageView:
     """One storage"""
     return get_storage(name)
-
-
-@storage_router.get("/{name}/folder", response_model=list[FolderView])
-def storage_folders(name: str) -> list[FolderView]:
-    """Top-level folders of a storage"""
-    return folder_views(get_storage(name))
-
-
-# ── folders: create, chown/chmod, delete ─────────────────────────────────────────────
-
-FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
-OWNER_RE = re.compile(r"^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$")
-MODE_RE = re.compile(r"^[0-7]{3,4}$")
-
-
-def validate_folder_name(value: str) -> str:
-    if value in (".", "..") or not FOLDER_NAME_RE.match(value):
-        raise PydanticCustomError(
-            "value_error",
-            f"Invalid folder name '{value}': letters, digits, '.', '_' and '-' only, "
-            "63 characters at most, no path separators",
-        )
-    return value
-
-
-def validate_owner(value: str) -> str:
-    """`user:group`, names or numeric ids, both resolvable on this host."""
-    if not OWNER_RE.match(value):
-        raise PydanticCustomError(
-            "value_error", f"Invalid owner '{value}': use user:group"
-        )
-    user, group = value.split(":", 1)
-    try:
-        resolve_owner(value)
-    except KeyError as e:
-        raise PydanticCustomError(
-            "value_error", f"Unknown {e.args[0]} in owner '{value}'"
-        ) from e
-    return f"{user}:{group}"
-
-
-def validate_mode(value: str) -> str:
-    if not MODE_RE.match(value):
-        raise PydanticCustomError(
-            "value_error", f"Invalid mode '{value}': octal such as 0777 or 755"
-        )
-    return value.zfill(4)
-
-
-FOLDER_NAME = Annotated[str, AfterValidator(validate_folder_name)]
-OWNER = Annotated[str, AfterValidator(validate_owner)]
-MODE = Annotated[str, AfterValidator(validate_mode)]
-
-
-class FolderCreate(BaseModel):
-    """A new top-level folder. Owner and mode default to the [nfs] config values."""
-
-    name: FOLDER_NAME
-    owner: OWNER | None = Field(None, description="user:group, default from config")
-    mode: MODE | None = Field(None, description="octal, default from config")
-
-
-class FolderUpdate(BaseModel):
-    """chown and/or chmod an existing folder."""
-
-    owner: OWNER | None = None
-    mode: MODE | None = None
-    recursive: bool = Field(
-        False, description="apply to everything below the folder as well"
-    )
-
-
-def resolve_owner(owner: str) -> tuple[int, int]:
-    user, group = owner.split(":", 1)
-    try:
-        uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
-    except KeyError:
-        raise KeyError("user") from None
-    try:
-        gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
-    except KeyError:
-        raise KeyError("group") from None
-    return uid, gid
-
-
-def default_owner() -> str:
-    return config.get("nfs", "folder_owner")
-
-
-def default_mode() -> str:
-    return config.get("nfs", "folder_mode").zfill(4)
-
-
-def apply_ownership(
-    path: Path, owner: str | None, mode: str | None, *, recursive: bool, source: str
-) -> list[Path]:
-    """chown/chmod `path` (and its tree when recursive). Returns the paths touched."""
-    targets = [path]
-    if recursive:
-        targets += sorted(p for p in path.rglob("*"))
-    uid_gid = resolve_owner(owner) if owner else None
-    bits = int(mode, 8) if mode else None
-    for target in targets:
-        if uid_gid is not None:
-            os.chown(target, *uid_gid, follow_symlinks=False)
-        if bits is not None and not target.is_symlink():
-            os.chmod(target, bits)
-    system.audit(
-        [
-            "folder-perms",
-            str(path),
-            f"owner={owner or '-'}",
-            f"mode={mode or '-'}",
-            f"recursive={recursive}",
-            f"paths={len(targets)}",
-        ],
-        0,
-        source,
-    )
-    return targets
-
-
-def folder_path(storage: StorageView, folder: str) -> Path:
-    return Path(storage.mountpoint) / folder
-
-
-def protected_or_404(storage_name: str, folder: str) -> tuple[StorageView, Path]:
-    """The storage and folder path, after the guard; existence is the caller's call."""
-    storage = get_storage(storage_name)
-    path = folder_path(storage, folder)
-    try:
-        guard.assert_mutable(str(path))
-    except guard.ProtectedError as e:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e)) from e
-    return storage, path
-
-
-def folder_view_of(storage: StorageView, name: str) -> FolderView:
-    for view in folder_views(storage):
-        if view.name == name:
-            return view
-    raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {name} not found")
-
-
-@storage_router.post("/{name}/folder", response_model=FolderView)
-def storage_folder_create(name: str, folder_in: FolderCreate) -> FolderView:
-    """Create a top-level folder on a storage"""
-    storage, path = protected_or_404(name, folder_in.name)
-    with system.storage_lock():
-        if path.exists():
-            raise HTTPException(status.HTTP_409_CONFLICT, f"{path} already exists")
-        owner = folder_in.owner or default_owner()
-        mode = folder_in.mode or default_mode()
-        try:
-            resolve_owner(owner)
-        except KeyError as e:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"Configured folder_owner '{owner}' has an unknown {e.args[0]}",
-            ) from e
-        path.mkdir(mode=0o700)
-        try:
-            apply_ownership(path, owner, mode, recursive=False, source="folder_create")
-        except OSError as e:
-            path.rmdir()
-            raise HTTPException(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                f"Failed to set ownership on {path}: {e}",
-            ) from e
-    return folder_view_of(storage, folder_in.name)
-
-
-@storage_router.put("/{name}/folder/{folder}", response_model=FolderView)
-def storage_folder_update(
-    name: str, folder: FOLDER_NAME, folder_in: FolderUpdate
-) -> FolderView:
-    """chown and/or chmod a folder"""
-    storage, path = protected_or_404(name, folder)
-    if folder_in.owner is None and folder_in.mode is None:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "Give an owner, a mode, or both"
-        )
-    with system.storage_lock():
-        if not path.is_dir():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {folder} not found")
-        try:
-            apply_ownership(
-                path,
-                folder_in.owner,
-                folder_in.mode,
-                recursive=folder_in.recursive,
-                source="folder_update",
-            )
-        except OSError as e:
-            raise HTTPException(
-                status.HTTP_500_INTERNAL_SERVER_ERROR,
-                f"Failed to change {path}: {e}",
-            ) from e
-    return folder_view_of(storage, folder)
-
-
-class FolderDeleted(BaseModel):
-    message: str
-    path: str
-    removed: int  # files and directories removed, the folder itself included
-    forced: bool
-
-
-def tree_size(path: Path) -> int:
-    """How many files and directories a recursive delete would remove, root included."""
-    return 1 + sum(1 for _ in path.rglob("*"))
-
-
-@storage_router.delete("/{name}/folder/{folder}", response_model=FolderDeleted)
-def storage_folder_delete(
-    name: str, folder: FOLDER_NAME, force: bool = False
-) -> FolderDeleted:
-    """Delete an unexported folder: empty, or with everything in it when force=true"""
-    from zboxapi.nfs import export_paths
-
-    storage, path = protected_or_404(name, folder)
-    with system.storage_lock():
-        if not path.is_dir():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {folder} not found")
-        if str(path) in export_paths():
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"{path} is exported; delete the export first"
-                + (" (force does not override this)" if force else ""),
-            )
-        entries = sum(1 for _ in path.iterdir())
-        if entries and not force:
-            raise HTTPException(
-                status.HTTP_409_CONFLICT,
-                f"{path} is not empty "
-                f"({entries} entr{'y' if entries == 1 else 'ies'}); "
-                "pass force=true to delete it with its contents",
-            )
-        removed = tree_size(path) if force else 1
-        try:
-            if force:
-                shutil.rmtree(path)
-            else:
-                path.rmdir()
-        except OSError as e:
-            raise HTTPException(
-                status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to delete {path}: {e}"
-            ) from e
-        system.audit(
-            ["rm", "-rf" if force else "-d", str(path), f"removed={removed}"],
-            0,
-            "folder_delete",
-        )
-    return FolderDeleted(
-        message=f"Folder {path} deleted"
-        + (f" with {removed - 1} entries" if force else ""),
-        path=str(path),
-        removed=removed,
-        forced=force,
-    )
 
 
 # ── storage lifecycle: create, adopt, grow, delete ───────────────────────────────────
@@ -995,3 +733,266 @@ def storage_delete(
             if disk := find_disk(storage.disk, nodes):
                 result.disk_state = classify(disk, guard.protected_set(nodes))[0]
     return result
+
+
+# ── folders: create, chown/chmod, delete ─────────────────────────────────────────────
+
+FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+RESERVED_FOLDER_NAMES = frozenset(
+    {"grow", "adopt", "folder"}
+)  # sub-resources of /storage
+OWNER_RE = re.compile(r"^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$")
+MODE_RE = re.compile(r"^[0-7]{3,4}$")
+
+
+def validate_folder_name(value: str) -> str:
+    if value.lower() in RESERVED_FOLDER_NAMES:
+        raise PydanticCustomError(
+            "value_error", f"'{value}' is a reserved name under /storage/{{name}}"
+        )
+    if value in (".", "..") or not FOLDER_NAME_RE.match(value):
+        raise PydanticCustomError(
+            "value_error",
+            f"Invalid folder name '{value}': letters, digits, '.', '_' and '-' only, "
+            "63 characters at most, no path separators",
+        )
+    return value
+
+
+def validate_owner(value: str) -> str:
+    """`user:group`, names or numeric ids, both resolvable on this host."""
+    if not OWNER_RE.match(value):
+        raise PydanticCustomError(
+            "value_error", f"Invalid owner '{value}': use user:group"
+        )
+    user, group = value.split(":", 1)
+    try:
+        resolve_owner(value)
+    except KeyError as e:
+        raise PydanticCustomError(
+            "value_error", f"Unknown {e.args[0]} in owner '{value}'"
+        ) from e
+    return f"{user}:{group}"
+
+
+def validate_mode(value: str) -> str:
+    if not MODE_RE.match(value):
+        raise PydanticCustomError(
+            "value_error", f"Invalid mode '{value}': octal such as 0777 or 755"
+        )
+    return value.zfill(4)
+
+
+FOLDER_NAME = Annotated[str, AfterValidator(validate_folder_name)]
+OWNER = Annotated[str, AfterValidator(validate_owner)]
+MODE = Annotated[str, AfterValidator(validate_mode)]
+
+
+class FolderCreate(BaseModel):
+    """Owner and mode of a new folder; both default to the [nfs] config values."""
+
+    owner: OWNER | None = Field(None, description="user:group, default from config")
+    mode: MODE | None = Field(None, description="octal, default from config")
+
+
+class FolderUpdate(BaseModel):
+    """chown and/or chmod an existing folder."""
+
+    owner: OWNER | None = None
+    mode: MODE | None = None
+    recursive: bool = Field(
+        False, description="apply to everything below the folder as well"
+    )
+
+
+def resolve_owner(owner: str) -> tuple[int, int]:
+    user, group = owner.split(":", 1)
+    try:
+        uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
+    except KeyError:
+        raise KeyError("user") from None
+    try:
+        gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
+    except KeyError:
+        raise KeyError("group") from None
+    return uid, gid
+
+
+def default_owner() -> str:
+    return config.get("nfs", "folder_owner")
+
+
+def default_mode() -> str:
+    return config.get("nfs", "folder_mode").zfill(4)
+
+
+def apply_ownership(
+    path: Path, owner: str | None, mode: str | None, *, recursive: bool, source: str
+) -> list[Path]:
+    """chown/chmod `path` (and its tree when recursive). Returns the paths touched."""
+    targets = [path]
+    if recursive:
+        targets += sorted(p for p in path.rglob("*"))
+    uid_gid = resolve_owner(owner) if owner else None
+    bits = int(mode, 8) if mode else None
+    for target in targets:
+        if uid_gid is not None:
+            os.chown(target, *uid_gid, follow_symlinks=False)
+        if bits is not None and not target.is_symlink():
+            os.chmod(target, bits)
+    system.audit(
+        [
+            "folder-perms",
+            str(path),
+            f"owner={owner or '-'}",
+            f"mode={mode or '-'}",
+            f"recursive={recursive}",
+            f"paths={len(targets)}",
+        ],
+        0,
+        source,
+    )
+    return targets
+
+
+def folder_path(storage: StorageView, folder: str) -> Path:
+    return Path(storage.mountpoint) / folder
+
+
+def protected_or_404(storage_name: str, folder: str) -> tuple[StorageView, Path]:
+    """The storage and folder path, after the guard; existence is the caller's call."""
+    storage = get_storage(storage_name)
+    path = folder_path(storage, folder)
+    try:
+        guard.assert_mutable(str(path))
+    except guard.ProtectedError as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(e)) from e
+    return storage, path
+
+
+def folder_view_of(storage: StorageView, name: str) -> FolderView:
+    for view in get_storage(storage.name).folders:
+        if view.name == name:
+            return view
+    raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {name} not found")
+
+
+@storage_router.post("/{name}/{folder}", response_model=FolderView)
+def storage_folder_create(
+    name: str, folder: FOLDER_NAME, folder_in: FolderCreate | None = None
+) -> FolderView:
+    """Create a top-level folder on a storage"""
+    folder_in = folder_in or FolderCreate()
+    storage, path = protected_or_404(name, folder)
+    with system.storage_lock():
+        if path.exists():
+            raise HTTPException(status.HTTP_409_CONFLICT, f"{path} already exists")
+        owner = folder_in.owner or default_owner()
+        mode = folder_in.mode or default_mode()
+        try:
+            resolve_owner(owner)
+        except KeyError as e:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"Configured folder_owner '{owner}' has an unknown {e.args[0]}",
+            ) from e
+        path.mkdir(mode=0o700)
+        try:
+            apply_ownership(path, owner, mode, recursive=False, source="folder_create")
+        except OSError as e:
+            path.rmdir()
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"Failed to set ownership on {path}: {e}",
+            ) from e
+    return folder_view_of(storage, folder)
+
+
+@storage_router.put("/{name}/{folder}", response_model=FolderView)
+def storage_folder_update(
+    name: str, folder: FOLDER_NAME, folder_in: FolderUpdate
+) -> FolderView:
+    """chown and/or chmod a folder"""
+    storage, path = protected_or_404(name, folder)
+    if folder_in.owner is None and folder_in.mode is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "Give an owner, a mode, or both"
+        )
+    with system.storage_lock():
+        if not path.is_dir():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {folder} not found")
+        try:
+            apply_ownership(
+                path,
+                folder_in.owner,
+                folder_in.mode,
+                recursive=folder_in.recursive,
+                source="folder_update",
+            )
+        except OSError as e:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"Failed to change {path}: {e}",
+            ) from e
+    return folder_view_of(storage, folder)
+
+
+class FolderDeleted(BaseModel):
+    message: str
+    path: str
+    removed: int  # files and directories removed, the folder itself included
+    forced: bool
+
+
+def tree_size(path: Path) -> int:
+    """How many files and directories a recursive delete would remove, root included."""
+    return 1 + sum(1 for _ in path.rglob("*"))
+
+
+@storage_router.delete("/{name}/{folder}", response_model=FolderDeleted)
+def storage_folder_delete(
+    name: str, folder: FOLDER_NAME, force: bool = False
+) -> FolderDeleted:
+    """Delete an unexported folder: empty, or with everything in it when force=true"""
+    from zboxapi.nfs import export_paths
+
+    storage, path = protected_or_404(name, folder)
+    with system.storage_lock():
+        if not path.is_dir():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Folder {folder} not found")
+        if str(path) in export_paths():
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{path} is exported; delete the export first"
+                + (" (force does not override this)" if force else ""),
+            )
+        entries = sum(1 for _ in path.iterdir())
+        if entries and not force:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                f"{path} is not empty "
+                f"({entries} entr{'y' if entries == 1 else 'ies'}); "
+                "pass force=true to delete it with its contents",
+            )
+        removed = tree_size(path) if force else 1
+        try:
+            if force:
+                shutil.rmtree(path)
+            else:
+                path.rmdir()
+        except OSError as e:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to delete {path}: {e}"
+            ) from e
+        system.audit(
+            ["rm", "-rf" if force else "-d", str(path), f"removed={removed}"],
+            0,
+            "folder_delete",
+        )
+    return FolderDeleted(
+        message=f"Folder {path} deleted"
+        + (f" with {removed - 1} entries" if force else ""),
+        path=str(path),
+        removed=removed,
+        forced=force,
+    )
