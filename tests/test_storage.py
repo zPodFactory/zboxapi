@@ -721,3 +721,21 @@ def test_mount_unit_is_in_local_fs_and_before_nfs_server(client, host, filer, tm
     assert "WantedBy=local-fs.target" in text
     assert "Before=nfs-server.service" in text
     assert "WantedBy=multi-user.target" not in text
+
+
+def test_delete_keeps_a_mountpoint_someone_wrote_into(client, host, filer, tmp_path):
+    """After umount the mount point is normally empty; if something was written into the
+    bare directory, the step is skipped rather than failing the whole removal."""
+    host.add_disk("sdd", 2 * T)
+    assert (
+        client.post("/storage", json={"disk": "sdd", "name": "STORAGE03"}).status_code
+        == 200
+    )
+    (filer / "STORAGE03" / "stray").write_text(
+        "x"
+    )  # in the fake, this survives the umount
+    r = client.delete("/storage/STORAGE03")
+    assert r.status_code == 200, r.text
+    assert dict(names(r.json()["steps"]))["mountpoint"] == "skipped"
+    assert (filer / "STORAGE03" / "stray").exists()
+    assert client.get("/storage/STORAGE03").status_code == 404

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import grp
 import os
 import pwd
@@ -635,12 +636,22 @@ def plan_delete(name: str) -> ops.Plan:
             argv=["systemctl", "daemon-reload"],
         )
     )
+
+    def remove_mountpoint() -> str:
+        try:
+            mountpoint.rmdir()
+        except OSError as e:
+            if e.errno != errno.ENOTEMPTY:
+                raise
+            return ops.SKIPPED  # something was written into the bare directory: keep it
+        return ops.DONE
+
     plan.add(
         Step(
             "mountpoint",
             storage.mountpoint,
-            "remove the empty mount point",
-            action=lambda: mountpoint.rmdir(),
+            "remove the empty mount point (kept when not empty)",
+            action=remove_mountpoint,
         )
     )
     return plan
