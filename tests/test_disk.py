@@ -37,14 +37,13 @@ def test_inventory_classifies_every_disk(client, host):
     assert by["sdb"]["partitions"][0] == {
         "name": "sdb1",
         "path": "/dev/sdb1",
-        "size": T - 2 * 1024**2,
-        "size_human": "1024.0G",
+        "size_bytes": T - 2 * 1024**2,
         "fstype": "ext4",
         "label": "STORAGE01",
         "uuid": "bbbb-storage01",
         "mountpoint": host.disks["sdb"].parts[0].mountpoint,
     }
-    assert by["sdc"]["size_human"] == "500.0G"
+    assert by["sdc"]["size_bytes"] == 500 * G
     assert by["sdc"]["serial"] == "6000c29sdc"
 
 
@@ -80,14 +79,7 @@ def test_rescan_finds_new_disks_and_size_changes(client, host):
     r = client.post("/disk/rescan")
     assert r.json()["new"] == []
     assert r.json()["resized"] == [
-        {
-            "disk": "sdc",
-            "before": 500 * G,
-            "after": T,
-            "before_human": "500.0G",
-            "after_human": "1.0T",
-            "storage": None,
-        }
+        {"disk": "sdc", "before_bytes": 500 * G, "after_bytes": T, "storage": None}
     ]
     assert client.post("/disk/rescan").json() == {"new": [], "resized": []}
 
@@ -100,7 +92,7 @@ def test_rescan_reads_new_sizes_of_every_disk_without_modifying_any(
     )  # grown in vSphere; a size rescan is a read, so it is seen
     host.resize("sda", 100 * G)
     r = client.post("/disk/rescan")
-    assert {d["disk"]: d["after"] for d in r.json()["resized"]} == {
+    assert {d["disk"]: d["after_bytes"] for d in r.json()["resized"]} == {
         "sdb": 2 * T,
         "sda": 100 * G,
     }

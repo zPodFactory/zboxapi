@@ -32,12 +32,9 @@ class StorageView(BaseModel):
     lv: str | None
     fstype: str | None
     uuid: str | None
-    size: int
-    used: int
-    avail: int
-    size_human: str
-    used_human: str
-    avail_human: str
+    size_bytes: int
+    used_bytes: int
+    available_bytes: int
     protected: bool
     managed: bool
     exports: int
@@ -114,12 +111,9 @@ def storage_view(
         lv=node.lv,
         fstype=node.fstype,
         uuid=node.uuid,
-        size=size,
-        used=used,
-        avail=avail,
-        size_human=system.human_size(size),
-        used_human=system.human_size(used),
-        avail_human=system.human_size(avail),
+        size_bytes=size,
+        used_bytes=used,
+        available_bytes=avail,
         protected=name in ps.storages,
         managed=mount_unit_path(name).is_file(),
         exports=sum(1 for p in export_paths if p.startswith(node.mountpoint + "/")),
@@ -584,11 +578,12 @@ def plan_grow(name: str) -> tuple[ops.Plan, system.BlockNode, dict[str, int]]:
 
 
 def sizes_of(node: system.BlockNode) -> dict[str, int]:
+    """Disk, partition, (LV) and filesystem sizes in bytes: a grow's before/after."""
     part = node.parent if node.type == "lvm" else node
-    out = {"disk": node.disk.size, "partition": part.size if part else 0}
+    out = {"disk_bytes": node.disk.size, "partition_bytes": part.size if part else 0}
     if node.type == "lvm":
-        out["lv"] = node.size
-    out["filesystem"] = usage(node.mountpoint or "")[0]
+        out["lv_bytes"] = node.size
+    out["filesystem_bytes"] = usage(node.mountpoint or "")[0]
     return out
 
 
@@ -730,7 +725,8 @@ def storage_grow(
             after_node = system.find_mounted(mountpoint_of(name)) or node
             result.after = sizes_of(after_node)
             result.changed = any(
-                result.after.get(k, 0) > before.get(k, 0) for k in ("partition", "lv")
+                result.after.get(k, 0) > before.get(k, 0)
+                for k in ("partition_bytes", "lv_bytes")
             )
             result.storage = get_storage(name)
     return result

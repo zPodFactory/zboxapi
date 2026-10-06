@@ -66,20 +66,22 @@ There is no force flag: a disk with anything on it is never formatted by this AP
 ### 1. List disks
 **GET** `/disk`
 
+Sizes are bytes everywhere in this API (`*_bytes`); the presentation layer formats them.
+
 ```json
 [
   {
-    "name": "sdb", "path": "/dev/sdb", "size": 1099511627776, "size_human": "1.0T",
+    "name": "sdb", "path": "/dev/sdb", "size_bytes": 1099511627776,
     "model": "Virtual disk", "serial": "6000c29...", "pttype": "gpt",
     "state": "protected", "reason": "sdb is protected: it holds /FILER/STORAGE01 (STORAGE01)",
     "partitions": [
-      {"name": "sdb1", "path": "/dev/sdb1", "size": 1099509530624, "size_human": "1024.0G",
+      {"name": "sdb1", "path": "/dev/sdb1", "size_bytes": 1099509530624,
        "fstype": "ext4", "label": null, "uuid": "9f0c…", "mountpoint": "/FILER/STORAGE01"}
     ],
     "storage": "STORAGE01"
   },
   {
-    "name": "sdc", "path": "/dev/sdc", "size": 536870912000, "size_human": "500.0G",
+    "name": "sdc", "path": "/dev/sdc", "size_bytes": 536870912000,
     "model": "Virtual disk", "serial": "6000c29...", "pttype": null,
     "state": "blank", "reason": "sdc has no partition table and no filesystem signature",
     "partitions": [], "storage": null
@@ -100,8 +102,7 @@ the hypervisor. Both are reads; nothing on any disk changes.
 {
   "new": ["sdc"],
   "resized": [
-    {"disk": "sdd", "before": 2199023255552, "after": 4398046511104,
-     "before_human": "2.0T", "after_human": "4.0T", "storage": "STORAGE03"}
+    {"disk": "sdd", "before_bytes": 2199023255552, "after_bytes": 4398046511104, "storage": "STORAGE03"}
   ]
 }
 ```
@@ -188,8 +189,7 @@ in reverse order and the 500 response carries `message`, `steps` and `rollback`.
   "lv": "data",
   "fstype": "ext4",
   "uuid": "3c1f…",
-  "size": 527430156288, "used": 28672, "avail": 527430127616,
-  "size_human": "491.2G", "used_human": "28.0K", "avail_human": "491.2G",
+  "size_bytes": 527430156288, "used_bytes": 28672, "available_bytes": 527430127616,
   "protected": false,
   "managed": true,
   "exports": 1,
@@ -242,8 +242,8 @@ After the virtual disk was enlarged in vSphere. Every step is online; clients ke
   "operation": "storage_grow",
   "dry_run": false,
   "changed": true,
-  "before": {"disk": 536870912000, "partition": 536868814848, "lv": 536864620544, "filesystem": 527430156288},
-  "after":  {"disk": 1099511627776, "partition": 1099509530624, "lv": 1099505336320, "filesystem": 1081103286272},
+  "before": {"disk_bytes": 536870912000, "partition_bytes": 536868814848, "lv_bytes": 536864620544, "filesystem_bytes": 527430156288},
+  "after":  {"disk_bytes": 1099511627776, "partition_bytes": 1099509530624, "lv_bytes": 1099505336320, "filesystem_bytes": 1081103286272},
   "steps": [
     {"step": "rescan",    "target": "/dev/sdc",  "detail": "re-read the disk size from the hypervisor", "status": "done"},
     {"step": "growpart",  "target": "/dev/sdc1", "detail": "extend the partition to the end of the disk", "status": "done"},

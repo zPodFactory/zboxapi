@@ -242,16 +242,6 @@ def find_mounted(
     return None
 
 
-def human_size(size: int) -> str:
-    """Bytes as duf prints them: 1006.9G, 491.2G, 2.6G, 28K."""
-    value = float(size)
-    for unit in ("B", "K", "M", "G", "T", "P"):
-        if value < 1024 or unit == "P":
-            return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
-        value /= 1024
-    return f"{value:.1f}P"
-
-
 # ── reading the audit log back ───────────────────────────────────────────────────────
 
 AUDIT_LINE = re.compile(

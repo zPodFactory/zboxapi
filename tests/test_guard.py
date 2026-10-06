@@ -189,13 +189,6 @@ def test_lvm_on_protected_disk_blocks_vg_lv_argv(host, filer):
             system.run(argv)
 
 
-def test_sizes_are_what_duf_prints():
-    assert system.human_size(T - 2 * 1024**2) == "1024.0G"
-    assert system.human_size(1006_9 * 1024**3 // 10) == "1006.9G"
-    assert system.human_size(28 * 1024) == "28.0K"
-    assert system.human_size(512) == "512B"
-
-
 # ── the protection matrix: every mutating endpoint against every protected target ──
 
 
@@ -241,7 +234,7 @@ def test_grow_is_the_one_operation_a_protected_storage_allows(client, host, file
     r = client.post("/storage/STORAGE01/grow?verbose=true")
     assert r.status_code == 200, r.text
     assert r.json()["changed"] is True
-    assert r.json()["after"]["partition"] == 2 * T - 2 * 1024**2
+    assert r.json()["after"]["partition_bytes"] == 2 * T - 2 * 1024**2
     part = host.disks["sdb"].parts[0]
     assert part.fstype == "ext4" and part.uuid == "bbbb-storage01"  # same filesystem
     assert part.mountpoint == str(filer / "STORAGE01")  # never unmounted

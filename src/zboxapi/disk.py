@@ -17,8 +17,7 @@ STORAGE_MOUNT_RE = re.compile(r"^(?P<root>.+)/(?P<name>STORAGE\d{2,3})$")
 class PartitionView(BaseModel):
     name: str
     path: str
-    size: int
-    size_human: str
+    size_bytes: int
     fstype: str | None
     label: str | None
     uuid: str | None
@@ -28,8 +27,7 @@ class PartitionView(BaseModel):
 class DiskView(BaseModel):
     name: str
     path: str
-    size: int
-    size_human: str
+    size_bytes: int
     model: str | None
     serial: str | None
     pttype: str | None
@@ -87,8 +85,7 @@ def disk_view(disk: system.BlockNode, ps: guard.ProtectedSet) -> DiskView:
     return DiskView(
         name=disk.name,
         path=disk.path,
-        size=disk.size,
-        size_human=system.human_size(disk.size),
+        size_bytes=disk.size,
         model=disk.model,
         serial=disk.serial,
         pttype=disk.pttype,
@@ -99,8 +96,7 @@ def disk_view(disk: system.BlockNode, ps: guard.ProtectedSet) -> DiskView:
             PartitionView(
                 name=p.name,
                 path=p.path,
-                size=p.size,
-                size_human=system.human_size(p.size),
+                size_bytes=p.size,
                 fstype=p.fstype,
                 label=p.label,
                 uuid=p.uuid,
@@ -145,10 +141,8 @@ def disk_get(name: str) -> DiskView:
 
 class ResizedDisk(BaseModel):
     disk: str
-    before: int
-    after: int
-    before_human: str
-    after_human: str
+    before_bytes: int
+    after_bytes: int
     storage: str | None
 
 
@@ -184,10 +178,8 @@ def rescan() -> RescanResult:
         resized=[
             ResizedDisk(
                 disk=name,
-                before=before[name].size,
-                after=after[name].size,
-                before_human=system.human_size(before[name].size),
-                after_human=system.human_size(after[name].size),
+                before_bytes=before[name].size,
+                after_bytes=after[name].size,
                 storage=_storage_in(after[name]),
             )
             for name in sorted(before)

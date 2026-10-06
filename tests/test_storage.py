@@ -31,7 +31,8 @@ def test_storage_list_shows_storage01(client, host, filer):
     assert (
         s["folders"][0]["protected"] is True and s["folders"][1]["protected"] is False
     )
-    assert s["size"] > 0 and s["size_human"].endswith(("G", "T", "M"))
+    assert s["size_bytes"] > 0 and s["available_bytes"] <= s["size_bytes"]
+    assert not any(k.endswith("_human") for k in s)
 
 
 def test_storage_list_includes_lvm_and_unmounted_is_absent(
@@ -567,9 +568,10 @@ def test_grow_lvm_storage(client, host, filer):
     assert body["steps"][0]["exit_code"] is None  # rescan is a sysfs write, no command
     assert body["steps"][3]["command"] == "lvextend -l +100%FREE /dev/vg_storage02/data"
     assert body["steps"][4]["command"] == "resize2fs /dev/mapper/vg_storage02-data"
-    assert body["before"]["disk"] == 500 * G and body["after"]["disk"] == T
-    assert body["after"]["partition"] == T - 2 * 1024**2
-    assert body["after"]["lv"] == T - 6 * 1024**2
+    assert body["before"]["disk_bytes"] == 500 * G
+    assert body["after"]["disk_bytes"] == T
+    assert body["after"]["partition_bytes"] == T - 2 * 1024**2
+    assert body["after"]["lv_bytes"] == T - 6 * 1024**2
     assert host.disks["sdc"].rescans == 1
 
     # a second grow is a no-op, not an error
@@ -604,7 +606,7 @@ def test_grow_raw_storage(client, host, filer):
         ("growpart", "done"),
         ("resize2fs", "done"),
     ]
-    assert r.json()["after"]["partition"] == 4 * T - 2 * 1024**2
+    assert r.json()["after"]["partition_bytes"] == 4 * T - 2 * 1024**2
     assert r.json()["changed"] is True
 
 
