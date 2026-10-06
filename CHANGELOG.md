@@ -46,6 +46,12 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   storages, `size_bytes` on disks and partitions, `before_bytes`/`after_bytes` on a rescan,
   `*_bytes` keys in a grow's before/after. No human-readable size fields: formatting belongs
   to the consumer.
+- **Per-export options.** `POST /nfs` and `PUT /nfs/{storage}/{folder}` take an optional
+  `options` string (`ro,no_subtree_check` for a read-only ISO library, `rw,...,root_squash`
+  for a squashed share), validated against an allowlist with conflicting pairs refused. It
+  applies to every client of the export, a client added later inherits it, and PUT without
+  it keeps the current one. Omitted on create, the configured `export_options` applies as
+  before. The export view carries `options` next to the per-client echo.
 - **Every step carries `exit_code`** in the operation responses, verbose or not: the
   command's exit status once it ran, `null` in a dry run, so both have the same shape.
 - **`GET /nfs/status`**: nfs-server state, NFS versions served, nfsd threads, exports served

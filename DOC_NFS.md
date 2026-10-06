@@ -34,8 +34,9 @@ folder_mode = 0777
 
 ## The model
 
-An export is a path `/FILER/<STORAGE>/<FOLDER>` plus a list of clients. Every client gets the
-same options from `export_options`. A client is an IPv4 address (`10.60.60.10`), an IPv4
+An export is a path `/FILER/<STORAGE>/<FOLDER>`, a list of clients, and one options string
+that every client of that export gets. The options default to `export_options` from the
+configuration and can be set per export (see "Options" below). A client is an IPv4 address (`10.60.60.10`), an IPv4
 network in CIDR notation (`10.60.60.0/26`) or `*` for everyone, which `exportfs` prints as
 `<world>`. Hostnames and IPv6 are rejected.
 
@@ -62,6 +63,7 @@ Merges both files with the live `exportfs -v`.
     "path": "/FILER/STORAGE01/NFS-01",
     "storage": "STORAGE01",
     "folder": "NFS-01",
+    "options": "rw,no_subtree_check",
     "clients": [{"client": "10.60.60.0/26", "options": "rw,no_subtree_check"}],
     "owner": "system",
     "protected": true,
@@ -72,6 +74,7 @@ Merges both files with the live `exportfs -v`.
     "path": "/FILER/STORAGE02/NFS-15",
     "storage": "STORAGE02",
     "folder": "NFS-15",
+    "options": "rw,no_subtree_check,no_root_squash",
     "clients": [{"client": "10.60.60.0/26", "options": "rw,no_subtree_check,no_root_squash"}],
     "owner": "user-defined",
     "protected": false,
@@ -97,11 +100,12 @@ One entry of the list above, or 404.
 {
   "storage": "STORAGE02",
   "folder": "NFS-15",
-  "clients": ["10.60.60.0/26", "192.168.0.10"]
+  "clients": ["10.60.60.0/26", "192.168.0.10"],
+  "options": "rw,no_subtree_check,no_root_squash"
 }
 ```
 
-The folder is created with `folder_owner` and `folder_mode` when it does not exist, and left
+`options` is optional and defaults to the configured string. The folder is created with `folder_owner` and `folder_mode` when it does not exist, and left
 exactly as it is when it does. The line is appended to the managed file, which is replaced
 atomically, then `exportfs -ra` runs. The response is the export as in the list.
 
@@ -120,7 +124,9 @@ Refused with:
 
 Creates the export (and the folder) when it is missing and answers **201**; replaces the
 client list otherwise and answers **200**. Safe to repeat, which is what an orchestrator
-wants for "this zPod's export must look like this". Same refusals as create.
+wants for "this zPod's export must look like this". `options` may be given too; omitted,
+an existing export keeps its options and a new one gets the configured default. Same
+refusals as create.
 
 ### 5. Add one client
 **POST** `/nfs/{storage}/{folder}/client`
@@ -185,12 +191,49 @@ folder is missing. NFSv3 clients come from `showmount -a` (the rmtab, best effor
 entry can outlive the mount); NFSv4 clients come from `/proc/fs/nfsd/clients` and are exact,
 but NFSv4 mounts the pseudo root so no per-export path is known for them.
 
+## Options
+
+One options string per export, applied to every client of it. Omitted, the configured
+`export_options` applies (`rw,no_subtree_check,no_root_squash`, what an ESXi datastore
+needs). A client added later inherits the export's options.
+
+Allowed: `ro`, `rw`, `sync`, `async`, `root_squash`, `no_root_squash`, `all_squash`,
+`no_all_squash`, `subtree_check`, `no_subtree_check`, `secure`, `insecure`, `wdelay`,
+`no_wdelay`, `crossmnt`, `hide`, `nohide`, `sec=sys|krb5|krb5i|krb5p` (colon-separated),
+`anonuid=N`, `anongid=N`, `fsid=N|root|uuid`. Anything else is 422, as are a pair that
+cannot both be given (`ro` with `rw`, `root_squash` with `no_root_squash`, ...), a duplicate,
+or an empty string. Whitespace is dropped.
+
+Three exports, three option sets:
+
+```json
+POST /nfs  {"storage": "STORAGE02", "folder": "NFS-15",  "clients": ["10.60.60.0/26"]}
+           → rw,no_subtree_check,no_root_squash         an ESXi datastore (default)
+POST /nfs  {"storage": "STORAGE02", "folder": "ISO",     "clients": ["*"],
+            "options": "ro,no_subtree_check"}
+           → ro,no_subtree_check                        a read-only ISO library for everyone
+POST /nfs  {"storage": "STORAGE02", "folder": "BACKUPS", "clients": ["192.168.0.0/24"],
+            "options": "rw,no_subtree_check,root_squash"}
+           → rw,no_subtree_check,root_squash            writable, root on the client is nobody
+PUT  /nfs/STORAGE02/ISO  {"clients": ["*"], "options": "ro,no_subtree_check,async"}
+           → the options change; the clients stay as given
+```
+
+The managed file then reads:
+
+```
+/FILER/STORAGE02/NFS-15 10.60.60.0/26(rw,no_subtree_check,no_root_squash)
+/FILER/STORAGE02/ISO *(ro,no_subtree_check,async)
+/FILER/STORAGE02/BACKUPS 192.168.0.0/24(rw,no_subtree_check,root_squash)
+```
+
 ## Validation Rules
 
 - **Storage name**: `STORAGE` followed by two or three digits (`STORAGE02`, `STORAGE123`).
 - **Folder name**: letters, digits, `.`, `_` and `-`, 63 characters at most, must start with a
   letter or digit, no path separators. `grow`, `adopt` and `folder` are reserved.
 - **Client**: IPv4 address, IPv4 network in CIDR notation, or `*`. At least one, no duplicates.
+- **Options**: from the allowlist above, no conflicting pair, no duplicate.
 
 ## Files
 
