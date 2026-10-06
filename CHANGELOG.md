@@ -42,6 +42,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `DELETE` removes a folder when it is empty and not exported, or with everything in it
   when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
   answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
+- **Every step carries `exit_code`** in the operation responses, verbose or not: the
+  command's exit status once it ran, `null` in a dry run, so both have the same shape.
 - **`GET /nfs/status`**: nfs-server state, NFS versions served, nfsd threads, exports served
   versus in the files, the inactive ones, and the connected clients (NFSv3 from the rmtab,
   NFSv4 from nfsd).

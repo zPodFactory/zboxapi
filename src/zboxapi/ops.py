@@ -29,8 +29,9 @@ class StepView(BaseModel):
     target: str
     detail: str
     status: str
-    command: str | None = None  # verbose only
-    output: str | None = None  # verbose only
+    exit_code: int | None = None  # of the command; null until one ran
+    command: str | None = None  # verbose only (left unset otherwise)
+    output: str | None = None  # verbose only (left unset otherwise)
 
 
 class OperationError(Exception):
@@ -57,6 +58,7 @@ class Step:
     nochange_rc: int | None = None  # exit code meaning "nothing to do" (growpart: 1)
     status: str = PLANNED
     output: str = ""
+    exit_code: int | None = None
 
     @property
     def command(self) -> str | None:
@@ -68,14 +70,19 @@ class Step:
         return text
 
     def view(self, verbose: bool) -> StepView:
-        return StepView(
-            step=self.step,
-            target=self.target,
-            detail=self.detail,
-            status=self.status,
-            command=self.command if verbose else None,
-            output=(self.output or None) if verbose else None,
-        )
+        """exit_code is always present (null until a command ran); command and output
+        are set only in verbose mode, so `exclude_unset` leaves them out otherwise."""
+        data = {
+            "step": self.step,
+            "target": self.target,
+            "detail": self.detail,
+            "status": self.status,
+            "exit_code": self.exit_code,
+        }
+        if verbose:
+            data["command"] = self.command
+            data["output"] = self.output or None
+        return StepView(**data)
 
 
 @dataclass
@@ -116,6 +123,7 @@ class Plan:
             result = system.run(
                 step.argv, check=False, input=step.stdin, source=self.name
             )
+            step.exit_code = result.returncode
             step.output = (result.stdout or "").strip() or (result.stderr or "").strip()
             if result.returncode == 0:
                 step.status = DONE
@@ -141,6 +149,7 @@ class Plan:
                 if step.undo_argv is not None:
                     undo.argv = step.undo_argv
                     result = system.run(step.undo_argv, check=False, source=self.name)
+                    undo.exit_code = result.returncode
                     undo.output = (result.stderr or result.stdout or "").strip()
                     undo.status = DONE if result.returncode == 0 else FAILED
                 else:

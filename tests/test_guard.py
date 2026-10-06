@@ -258,6 +258,11 @@ def test_grow_failure_on_protected_storage_changes_nothing(client, host, filer):
     assert detail["message"].startswith(
         "Cannot grow STORAGE01: growpart on /dev/sdb1 failed"
     )
+    assert {s["step"]: s.get("exit_code") for s in detail["steps"]} == {
+        "rescan": None,
+        "growpart": 2,
+        "resize2fs": None,
+    }
     assert "The data is untouched" in detail["message"]
     assert detail["rollback"] == []
     assert host.snapshot("sdb", sizes=False) == before

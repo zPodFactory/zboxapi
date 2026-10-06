@@ -672,15 +672,15 @@ def run_plan(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
             {
                 "message": failure.format(error=e),
-                "steps": [s.model_dump(exclude_none=True) for s in e.steps],
-                "rollback": [s.model_dump(exclude_none=True) for s in e.rollback],
+                "steps": [s.model_dump(exclude_unset=True) for s in e.steps],
+                "rollback": [s.model_dump(exclude_unset=True) for s in e.rollback],
             },
         ) from e
     return OperationResult(operation=plan.name, dry_run=False, steps=steps)
 
 
 @storage_router.post(
-    "", response_model=OperationResult, response_model_exclude_none=True
+    "", response_model=OperationResult, response_model_exclude_unset=True
 )
 def storage_create(
     body: StorageCreate, dry_run: bool = False, verbose: bool = False
@@ -695,7 +695,7 @@ def storage_create(
 
 
 @storage_router.post(
-    "/adopt", response_model=OperationResult, response_model_exclude_none=True
+    "/adopt", response_model=OperationResult, response_model_exclude_unset=True
 )
 def storage_adopt(
     body: StorageAdopt, dry_run: bool = False, verbose: bool = False
@@ -710,7 +710,7 @@ def storage_adopt(
 
 
 @storage_router.post(
-    "/{name}/grow", response_model=OperationResult, response_model_exclude_none=True
+    "/{name}/grow", response_model=OperationResult, response_model_exclude_unset=True
 )
 def storage_grow(
     name: STORAGE_NAME, dry_run: bool = False, verbose: bool = False
@@ -737,7 +737,7 @@ def storage_grow(
 
 
 @storage_router.delete(
-    "/{name}", response_model=OperationResult, response_model_exclude_none=True
+    "/{name}", response_model=OperationResult, response_model_exclude_unset=True
 )
 def storage_delete(
     name: STORAGE_NAME, dry_run: bool = False, verbose: bool = False

@@ -160,7 +160,9 @@ Create, adopt, grow and delete run as a plan of named steps and answer with it:
 }
 ```
 
-Two query parameters on each of them:
+Every step carries `exit_code`: the command's exit status once it ran, `null` in a dry run
+or for a step that is not a command, so a failed or `nochange` step can be read without the
+log and a dry run has the same shape as the real run. Two query parameters on each of them:
 
 - `?dry_run=true` returns the same steps with status `planned` and runs nothing;
 - `?verbose=true` adds the exact `command` and its `output` to every step.

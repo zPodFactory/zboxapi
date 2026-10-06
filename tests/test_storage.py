@@ -321,6 +321,10 @@ def names(steps):
     return [(s["step"], s["status"]) for s in steps]
 
 
+def statuses_rc(steps):
+    return {s["step"]: s.get("exit_code") for s in steps}
+
+
 def test_create_raw_storage(client, host, filer, tmp_path):
     host.add_disk("sdd", 2 * T)
     r = client.post("/storage", json={"disk": "sdd", "lvm": False, "name": "STORAGE03"})
@@ -399,6 +403,7 @@ def test_create_dry_run_changes_nothing(client, host, filer):
     body = r.json()
     assert body["dry_run"] is True and "storage" not in body
     assert all(s["status"] == "planned" for s in body["steps"])
+    assert all(s["exit_code"] is None for s in body["steps"])  # same shape, nothing ran
     assert any(s["command"].startswith("vgcreate vg_storage02") for s in body["steps"])
     assert host.disks["sdc"].pttype is None and host.mutating_calls == []
     assert not (filer / "STORAGE02").exists()
@@ -459,6 +464,8 @@ def test_create_rolls_back_when_mkfs_fails(client, host, filer, tmp_path):
     ]
     assert all(s["status"] == "done" for s in detail["rollback"])
     assert detail["rollback"][-1]["command"] == "wipefs -a /dev/sde"
+    assert all(s["exit_code"] == 0 for s in detail["rollback"])
+    assert statuses_rc(detail["steps"])["mkfs"] == 2
     # the disk is blank again, nothing else was created
     assert host.disks["sde"].pttype is None and host.disks["sde"].parts == []
     assert host.lvs == []
@@ -556,6 +563,8 @@ def test_grow_lvm_storage(client, host, filer):
     ]
     assert body["steps"][1]["command"] == "growpart /dev/sdc 1"
     assert body["steps"][1]["output"].startswith("CHANGED")
+    assert body["steps"][1]["exit_code"] == 0
+    assert body["steps"][0]["exit_code"] is None  # rescan is a sysfs write, no command
     assert body["steps"][3]["command"] == "lvextend -l +100%FREE /dev/vg_storage02/data"
     assert body["steps"][4]["command"] == "resize2fs /dev/mapper/vg_storage02-data"
     assert body["before"]["disk"] == 500 * G and body["after"]["disk"] == T
@@ -567,6 +576,11 @@ def test_grow_lvm_storage(client, host, filer):
     r = client.post("/storage/STORAGE02/grow")
     assert r.status_code == 200
     assert r.json()["changed"] is False
+    by_step = {s["step"]: s for s in r.json()["steps"]}
+    assert (
+        by_step["growpart"]["exit_code"] == 1
+    )  # NOCHANGE, reported even without verbose
+    assert by_step["lvextend"]["exit_code"] == 5
     assert names(r.json()["steps"]) == [
         ("rescan", "done"),
         ("growpart", "nochange"),
