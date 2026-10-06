@@ -204,3 +204,51 @@ def disk_rescan() -> RescanResult:
             return rescan()
     except (system.CommandError, OSError) as e:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
+
+
+# ── detach ───────────────────────────────────────────────────────────────────────────
+
+
+class DetachResult(BaseModel):
+    disk: str
+    serial: str | None
+    detached: bool
+    message: str
+
+
+@disk_router.post("/{name}/detach", response_model=DetachResult)
+def disk_detach(name: str) -> DetachResult:
+    """Tell the kernel to forget a disk that is no longer in use, so it can be removed
+    from the VM cleanly. Nothing on the disk is touched."""
+    nodes = system.block_devices()
+    ps = guard.protected_set(nodes)
+    disk = find_disk(name, nodes)
+    if disk is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"Disk {name} not found")
+    state, reason, storage = classify(disk, ps)
+    if state in ("protected", "system"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, reason)
+    mounted = [n.mountpoint for n in disk.walk() if n.mountpoint]
+    if mounted:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"{name} has a mounted filesystem ({', '.join(mounted)})"
+            + (f"; remove {storage} first" if storage else ""),
+        )
+    node = system.SYS_BLOCK / name / "device" / "delete"
+    if not node.exists():
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f"{name} cannot be detached: no {node}"
+        )
+    with system.storage_lock():
+        system.write_sysfs(node, "1\n", source="disk_detach")
+    gone = find_disk(name, system.block_devices()) is None
+    return DetachResult(
+        disk=name,
+        serial=disk.serial,
+        detached=gone,
+        message=f"{name} removed from the kernel; the virtual disk can now be removed "
+        "from the VM"
+        if gone
+        else f"{name} is still present after the delete request",
+    )

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import AfterValidator, BaseModel, Field
 from pydantic_core import PydanticCustomError
 
@@ -158,8 +158,103 @@ def get_export(storage: str, folder: str) -> ExportView:
     raise HTTPException(status.HTTP_404_NOT_FOUND, f"Export {path} not found")
 
 
+# ── server status ────────────────────────────────────────────────────────────────────
+
+PROC_NFSD = Path("/proc/fs/nfsd")
+RMTAB = Path("/var/lib/nfs/rmtab")
+
+
+class NfsClientView(BaseModel):
+    client: str  # address, or host:port for NFSv4
+    path: (
+        str | None
+    )  # the mounted export (NFSv3 only; NFSv4 clients mount the pseudo root)
+    version: str  # "3" (from rmtab/showmount) or "4.x" (from nfsd)
+
+
+class NfsStatus(BaseModel):
+    service: str  # active | inactive | failed | unknown
+    enabled: bool
+    versions: list[str]  # NFS versions the server serves, e.g. ["3", "4", "4.1", "4.2"]
+    threads: int | None
+    exports: int  # paths exportfs currently serves
+    exports_in_files: int  # paths in /etc/exports plus the managed file
+    inactive_exports: list[
+        str
+    ]  # in a file, not served (folder missing, or reload needed)
+    clients: list[NfsClientView]
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
+
+
+def nfs_versions() -> list[str]:
+    """`/proc/fs/nfsd/versions` reads like `-2 +3 +4 +4.1 +4.2`."""
+    return [t[1:] for t in _read(PROC_NFSD / "versions").split() if t.startswith("+")]
+
+
+def nfs_clients() -> list[NfsClientView]:
+    out: list[NfsClientView] = []
+    # NFSv3: rmtab, what showmount -a prints. Best effort: entries can be stale.
+    result = system.query(["showmount", "-a", "--no-headers"], check=False)
+    lines = (result.stdout or "").splitlines() if result.returncode == 0 else []
+    if not lines:
+        lines = [
+            ln.split(":", 1)[0] + ":" + ln.split(":", 2)[1]
+            for ln in _read(RMTAB).splitlines()
+            if ln.count(":") >= 2
+        ]
+    for line in lines:
+        host, _, path = line.strip().partition(":")
+        if host:
+            out.append(NfsClientView(client=host, path=path or None, version="3"))
+    # NFSv4: one directory per client under /proc/fs/nfsd/clients, with an info file.
+    for info in sorted((PROC_NFSD / "clients").glob("*/info")):
+        fields = dict(ln.split(":", 1) for ln in _read(info).splitlines() if ":" in ln)
+        address = fields.get("address", "").strip().strip('"')
+        minor = fields.get("minor version", "").strip()
+        if address:
+            out.append(
+                NfsClientView(
+                    client=address, path=None, version=f"4.{minor}" if minor else "4"
+                )
+            )
+    return out
+
+
+def nfs_status() -> NfsStatus:
+    active = system.query(["systemctl", "is-active", "nfs-server"], check=False)
+    enabled = system.query(["systemctl", "is-enabled", "nfs-server"], check=False)
+    live = active_exports()
+    in_files = export_paths()
+    threads = _read(PROC_NFSD / "threads").strip()
+    return NfsStatus(
+        service=(active.stdout or "unknown").strip() or "unknown",
+        enabled=(enabled.stdout or "").strip() == "enabled",
+        versions=nfs_versions(),
+        threads=int(threads) if threads.isdigit() else None,
+        exports=len(live),
+        exports_in_files=len(in_files),
+        inactive_exports=sorted(in_files - set(live)),
+        clients=nfs_clients(),
+    )
+
+
 # API Router
 nfs_router = APIRouter(prefix="/nfs", tags=["nfs"])
+
+
+@nfs_router.get("/status", response_model=NfsStatus)
+def nfs_get_status() -> NfsStatus:
+    """The NFS server: service state, versions, threads, exports served, clients"""
+    try:
+        return nfs_status()
+    except system.CommandError as e:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e)) from e
 
 
 @nfs_router.get("", response_model=list[ExportView])
@@ -355,15 +450,27 @@ def nfs_create(export_in: ExportCreate) -> ExportView:
 
 
 @nfs_router.put("/{storage}/{folder}", response_model=ExportView)
-def nfs_update(storage: str, folder: str, export_in: ExportUpdate) -> ExportView:
-    """Replace the client list of an export"""
-    path = mutable_export(storage, folder, must_exist=True)
+def nfs_update(
+    storage: STORAGE_NAME,
+    folder: FOLDER_NAME,
+    export_in: ExportUpdate,
+    response: Response,
+) -> ExportView:
+    """Make the export exist with exactly these clients: created when missing (201),
+    replaced otherwise (200). Safe to repeat."""
+    path = mutable_export(storage, folder, must_exist=False)
     with system.storage_lock():
         table = managed_table()
+        created = path not in table
+        if created:
+            mounted = mounted_storage(storage)
+            ensure_folder(Path(mounted.mountpoint) / folder, "nfs_update")
         table[path] = list(export_in.clients)
         write_managed(table)
         system.audit(["export", path, *export_in.clients], 0, "nfs_update")
         reload_exports("nfs_update")
+    if created:
+        response.status_code = status.HTTP_201_CREATED
     return view_of(path)
 
 

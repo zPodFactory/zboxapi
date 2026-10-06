@@ -255,16 +255,20 @@ def next_free_name(existing: set[str]) -> str:
 def mount_unit_text(name: str, uuid: str, device: str) -> str:
     fstype = config.get("storage", "filesystem")
     options = config.get("storage", "mount_options")
+    # local-fs.target, like an fstab entry, so the mount is in place before nfs-server
+    # starts (it orders itself after local-fs.target); Before= makes it explicit.
+    # Without both, exportfs skips the missing paths at boot: no exports until a reload.
     return (
         "[Unit]\n"
-        f"Description=zboxapi storage {name} ({device})\n\n"
+        f"Description=zboxapi storage {name} ({device})\n"
+        "Before=nfs-server.service\n\n"
         "[Mount]\n"
         f"What=UUID={uuid}\n"
         f"Where={mountpoint_of(name)}\n"
         f"Type={fstype}\n"
         f"Options={options}\n\n"
         "[Install]\n"
-        "WantedBy=multi-user.target\n"
+        "WantedBy=local-fs.target\n"
     )
 
 

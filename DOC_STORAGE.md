@@ -106,6 +106,23 @@ the hypervisor. Both are reads; nothing on any disk changes.
 }
 ```
 
+### 4. Detach a disk
+**POST** `/disk/{name}/detach`
+
+After `DELETE /storage` (or for a disk that was never used), tells the kernel to forget the
+device so the virtual disk can be removed from the VM without leaving a stale `/dev/sdX`
+behind. Nothing on the disk is touched. Refused with 409 while anything on it is mounted,
+403 for the protected and system disks.
+
+```json
+{
+  "disk": "sdd",
+  "serial": "6000c29...",
+  "detached": true,
+  "message": "sdd removed from the kernel; the virtual disk can now be removed from the VM"
+}
+```
+
 ## Storages
 
 A storage is one filesystem on one disk, mounted at `/FILER/STORAGEnn`. Two layouts:
@@ -317,6 +334,20 @@ Without `lvm2`, `lvm: true` answers 400 and raw storages work.
 /FILER/STORAGEnn                            the mount point
 /var/log/zboxapi-storage.log                every command and file change, with exit status
 /run/zboxapi-storage.lock                   one lock for every mutating storage and nfs call
+```
+
+## Audit
+
+**GET** `/audit?limit=50` returns what the storage and nfs routers did on this host,
+newest first, straight from `/var/log/zboxapi-storage.log`: every command with its exit
+status, every file and folder change.
+
+```json
+[
+  {"time": "2026-10-06T09:12:44", "source": "nfs_create", "rc": 0, "command": "exportfs -ra"},
+  {"time": "2026-10-06T09:12:44", "source": "nfs_create", "rc": 0, "command": "export /FILER/STORAGE02/NFS-15 10.60.60.0/26"},
+  {"time": "2026-10-06T09:11:02", "source": "storage_create", "rc": 0, "command": "systemctl enable --now FILER-STORAGE02.mount"}
+]
 ```
 
 ## Error Handling

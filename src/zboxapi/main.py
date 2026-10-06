@@ -7,11 +7,12 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Security, status
 from fastapi.routing import APIRoute
 from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
 
-from zboxapi import __version__
+from zboxapi import __version__, system
 from zboxapi.disk import disk_router
 from zboxapi.dns import dns_router
 from zboxapi.nfs import nfs_router
@@ -72,6 +73,20 @@ app = FastAPI(
     lifespan=lifespan,
     generate_unique_id_function=generate_operation_id,
 )
+
+
+class AuditEntry(BaseModel):
+    time: str
+    source: str
+    rc: int
+    command: str
+
+
+@app.get("/audit", response_model=list[AuditEntry], tags=["audit"])
+def audit_get(limit: int = Query(50, ge=1, le=1000)) -> list[AuditEntry]:
+    """What the storage and nfs routers did on this host, newest first"""
+    return [AuditEntry(**e) for e in system.audit_entries(limit)]
+
 
 # Include routers
 app.include_router(dns_router)

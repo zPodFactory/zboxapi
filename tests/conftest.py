@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import zboxapi.config as config
 import zboxapi.dns as dns
 import zboxapi.main as main
+import zboxapi.nfs as nfs
 import zboxapi.storage as storage
 import zboxapi.system as system_mod
 import zboxapi.vlan as vlan
@@ -176,6 +177,13 @@ def filer(tmp_path, monkeypatch):
     monkeypatch.setattr(system_mod, "LOCK_FILE", tmp_path / "storage.lock")
     monkeypatch.setattr(system_mod, "SYS_BLOCK", tmp_path / "sys" / "block")
     monkeypatch.setattr(system_mod, "SYS_SCSI_HOST", tmp_path / "sys" / "scsi_host")
+    nfsd = tmp_path / "proc" / "fs" / "nfsd"
+    nfsd.mkdir(parents=True)
+    (nfsd / "versions").write_text("-2 +3 +4 +4.1 +4.2\n")
+    (nfsd / "threads").write_text("8\n")
+    (nfsd / "clients").mkdir()
+    monkeypatch.setattr(nfs, "PROC_NFSD", nfsd)
+    monkeypatch.setattr(nfs, "RMTAB", tmp_path / "rmtab")
     return root
 
 

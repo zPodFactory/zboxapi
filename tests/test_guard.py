@@ -220,6 +220,8 @@ def test_sizes_are_what_duf_prints():
         ("POST", "/nfs/STORAGE01/NFS-01/client", {"client": "*"}),
         ("DELETE", "/nfs/STORAGE01/NFS-01/client/10.60.60.0/26", None),
         ("DELETE", "/nfs/STORAGE01/NFS-01", None),
+        ("POST", "/disk/sdb/detach", None),
+        ("POST", "/disk/sda/detach", None),
     ],
 )
 def test_matrix_protected_targets_get_403_and_nothing_runs(
@@ -334,10 +336,16 @@ def test_invariants_hold_across_random_call_sequences(client, host, filer, tmp_p
         lambda: client.delete(
             f"/nfs/STORAGE01/{rng.choice(['NFS-01', 'NFS-06'])}/client/10.60.60.0/26"
         ),
+        lambda: client.post(f"/disk/{rng.choice(['sda', 'sdb', 'sdc', 'sdd'])}/detach"),
+        lambda: client.put(
+            f"/nfs/STORAGE01/{rng.choice(['NFS-01', 'NFS-02', 'NFS-06'])}",
+            json={"clients": ["*"]},
+        ),
     ]
     for _ in range(300):
         rng.choice(actions)()
     # sdb may only have grown: same layout, labels, UUIDs and mount, sizes never smaller
+    assert "sdb" in host.disks and "sda" in host.disks  # never detached
     assert host.snapshot("sdb", sizes=False) == seed_sdb
     assert all(a >= b for a, b in zip(host.sizes("sdb"), seed_sizes, strict=True))
     assert (etc / "exports").read_text() == seed_exports

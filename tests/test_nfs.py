@@ -261,9 +261,8 @@ def test_export_update_replaces_clients(client, host, filer, tmp_path):
     assert [c["client"] for c in r.json()["clients"]] == ["192.168.0.0/24", "*"]
     assert host.active_exports[f"{filer}/STORAGE01/NFS-06"] == ["192.168.0.0/24", "*"]
     assert client.put("/nfs/STORAGE01/NFS-06", json={"clients": []}).status_code == 422
-    assert (
-        client.put("/nfs/STORAGE01/NFS-99", json={"clients": ["*"]}).status_code == 404
-    )
+    r = client.put("/nfs/STORAGE01/NFS-99", json={"clients": ["*"]})
+    assert r.status_code == 201  # PUT creates what is missing
 
 
 def test_export_clients_add_and_remove(client, host, filer, tmp_path):
@@ -384,3 +383,62 @@ def test_managed_file_round_trips_through_the_parser(client, host, filer, tmp_pa
         "B": ["10.0.0.1", "10.0.1.0/24"],
     }
     assert all(c.options == EXPORT_OPTS for cs in parsed.values() for c in cs)
+
+
+# ── upsert, status ───────────────────────────────────────────────────────────────────
+
+
+def test_put_creates_when_missing_and_is_idempotent(client, host, filer, tmp_path):
+    body = {"clients": ["10.60.60.0/26"]}
+    r = client.put("/nfs/STORAGE01/NFS-06", json=body)
+    assert r.status_code == 201, r.text
+    assert (filer / "STORAGE01" / "NFS-06").is_dir()
+    assert [c["client"] for c in r.json()["clients"]] == ["10.60.60.0/26"]
+
+    r = client.put("/nfs/STORAGE01/NFS-06", json=body)  # same call again
+    assert r.status_code == 200, r.text
+    assert [c["client"] for c in r.json()["clients"]] == ["10.60.60.0/26"]
+    assert managed(tmp_path).count("NFS-06") == 1  # one line, not two
+
+    r = client.put("/nfs/STORAGE01/NFS-06", json={"clients": ["*"]})
+    assert r.status_code == 200 and [c["client"] for c in r.json()["clients"]] == ["*"]
+
+    r = client.put("/nfs/STORAGE09/NFS-06", json=body)
+    assert r.status_code == 400 and "not mounted" in r.json()["detail"]
+    assert client.put("/nfs/STORAGE01/NFS-01", json=body).status_code == 403
+    assert client.put("/nfs/STORAGE01/NFS-02", json=body).status_code == 403
+
+
+def test_nfs_status(client, host, filer, tmp_path):
+    host.v3_mounts = [("10.60.60.11", f"{filer}/STORAGE01/NFS-01")]
+    info = tmp_path / "proc" / "fs" / "nfsd" / "clients" / "7" / "info"
+    info.parent.mkdir()
+    info.write_text(
+        'clientid: 0x1\naddress: "10.60.60.12:812"\nstatus: confirmed\n'
+        "name: Linux NFSv4.1 esx02\nminor version: 1\n"
+    )
+    (tmp_path / "etc" / "exports.d" / "zboxapi.exports").write_text(
+        f"{filer}/STORAGE01/NFS-GONE *({EXPORT_OPTS})\n"
+    )  # in a file, not reloaded: inactive
+
+    r = client.get("/nfs/status")
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "service": "active",
+        "enabled": True,
+        "versions": ["3", "4", "4.1", "4.2"],
+        "threads": 8,
+        "exports": 6,
+        "exports_in_files": 7,
+        "inactive_exports": [f"{filer}/STORAGE01/NFS-GONE"],
+        "clients": [
+            {
+                "client": "10.60.60.11",
+                "path": f"{filer}/STORAGE01/NFS-01",
+                "version": "3",
+            },
+            {"client": "10.60.60.12:812", "path": None, "version": "4.1"},
+        ],
+    }
+    host.nfs_state = "inactive"
+    assert client.get("/nfs/status").json()["service"] == "inactive"

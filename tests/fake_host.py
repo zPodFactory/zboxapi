@@ -106,6 +106,7 @@ class FakeHost:
             node = self.sysfs / "block" / name / "device"
             node.mkdir(parents=True, exist_ok=True)
             (node / "rescan").write_text("")
+            (node / "delete").write_text("")
 
     def hotplug(self, disk: Disk) -> None:
         """A disk attached in vSphere: visible after the next SCSI host scan."""
@@ -132,6 +133,10 @@ class FakeHost:
                 disk.rescans += 1
                 if name in self.pending_sizes:
                     disk.size = self.pending_sizes.pop(name)
+            delete = self.sysfs / "block" / name / "device" / "delete"
+            if delete.exists() and delete.read_text().strip() == "1":
+                del self.disks[name]  # the kernel forgot the device
+                self.detached = getattr(self, "detached", []) + [name]
 
     def add_part(self, disk: str, size: int | None = None, **kw) -> Part:
         d = self.disks[disk]
@@ -301,6 +306,13 @@ class FakeHost:
                 return 0, self.lsblk(), ""
             case ["exportfs", "-v"]:
                 return 0, self.exportfs_v(), ""
+            case ["showmount", "-a", "--no-headers"]:
+                mounts = getattr(self, "v3_mounts", [])  # (host, path)
+                return 0, "".join(f"{h}:{p}\n" for h, p in mounts), ""
+            case ["systemctl", "is-active", "nfs-server"]:
+                return 0, getattr(self, "nfs_state", "active") + "\n", ""
+            case ["systemctl", "is-enabled", "nfs-server"]:
+                return 0, "enabled\n", ""
             case ["exportfs", "-ra"] | ["exportfs", "-r"]:
                 self.mutating_calls.append(cmd)
                 self.reload_exports()

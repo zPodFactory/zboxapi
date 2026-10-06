@@ -111,12 +111,16 @@ Refused with:
 - 409 when the path is already exported by the managed file
 - 422 for an invalid client, an empty or duplicated client list, or a bad name
 
-### 4. Replace the clients
+### 4. Make an export exist with exactly these clients
 **PUT** `/nfs/{storage}/{folder}`
 
 ```json
 { "clients": ["192.168.0.0/24", "*"] }
 ```
+
+Creates the export (and the folder) when it is missing and answers **201**; replaces the
+client list otherwise and answers **200**. Safe to repeat, which is what an orchestrator
+wants for "this zPod's export must look like this". Same refusals as create.
 
 ### 5. Add one client
 **POST** `/nfs/{storage}/{folder}/client`
@@ -156,6 +160,30 @@ separate decision, made with `DELETE /storage/{storage}/{folder}?force=true` (se
   "folder_kept": true
 }
 ```
+
+### 8. Server status
+**GET** `/nfs/status`
+
+```json
+{
+  "service": "active",
+  "enabled": true,
+  "versions": ["3", "4", "4.1", "4.2"],
+  "threads": 8,
+  "exports": 7,
+  "exports_in_files": 7,
+  "inactive_exports": [],
+  "clients": [
+    {"client": "10.60.60.11", "path": "/FILER/STORAGE01/NFS-01", "version": "3"},
+    {"client": "10.60.60.12:812", "path": null, "version": "4.1"}
+  ]
+}
+```
+
+`inactive_exports` lists paths that are in a file but not served, usually because the
+folder is missing. NFSv3 clients come from `showmount -a` (the rmtab, best effort: an
+entry can outlive the mount); NFSv4 clients come from `/proc/fs/nfsd/clients` and are exact,
+but NFSv4 mounts the pseudo root so no per-export path is known for them.
 
 ## Validation Rules
 

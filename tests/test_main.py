@@ -62,6 +62,9 @@ def test_requests_with_wrong_token_are_rejected(anon_client):
         ("POST", "/nfs/STORAGE01/NFS-02/client"),
         ("DELETE", "/nfs/STORAGE01/NFS-02/client/10.60.60.0/26"),
         ("DELETE", "/nfs/STORAGE01/NFS-02"),
+        ("GET", "/nfs/status"),
+        ("POST", "/disk/sdc/detach"),
+        ("GET", "/audit"),
     ],
 )
 def test_every_endpoint_requires_auth(anon_client, method, path):
@@ -146,6 +149,9 @@ def test_openapi_metadata_and_operation_ids(client):
         "nfs_nfs_client_add",
         "nfs_nfs_client_remove",
         "nfs_nfs_delete",
+        "nfs_nfs_get_status",
+        "disk_disk_detach",
+        "audit_audit_get",
     }
 
 
@@ -154,3 +160,18 @@ def test_version_matches_installed_package():
 
     assert zboxapi.__version__ == version("zboxapi")
     assert PASSWORD  # sanity: fixtures module importable
+
+
+def test_audit_endpoint_lists_newest_first(client, host, filer, tmp_path):
+    assert client.get("/audit").json() == []
+    client.post(
+        "/nfs", json={"storage": "STORAGE01", "folder": "NFS-06", "clients": ["*"]}
+    )
+    client.delete("/nfs/STORAGE01/NFS-06")
+    entries = client.get("/audit?limit=2").json()
+    assert [e["source"] for e in entries] == ["nfs_delete", "nfs_delete"]
+    assert entries[0]["command"] == "exportfs -ra" and entries[0]["rc"] == 0
+    assert entries[1]["command"].startswith("unexport ")
+    assert all(set(e) == {"time", "source", "rc", "command"} for e in entries)
+    assert len(client.get("/audit").json()) == 5
+    assert client.get("/audit?limit=0").status_code == 422

@@ -42,6 +42,14 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `DELETE` removes a folder when it is empty and not exported, or with everything in it
   when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
   answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
+- **`GET /nfs/status`**: nfs-server state, NFS versions served, nfsd threads, exports served
+  versus in the files, the inactive ones, and the connected clients (NFSv3 from the rmtab,
+  NFSv4 from nfsd).
+- **`PUT /nfs/{storage}/{folder}` creates what is missing** (201) and replaces the clients
+  otherwise (200), so an orchestrator can repeat it safely.
+- **`POST /disk/{name}/detach`** tells the kernel to forget a disk nothing is mounted from, so
+  the virtual disk can be removed from the VM cleanly. Protected and system disks: 403.
+- **`GET /audit`**: the storage and nfs audit log, newest first, over the API.
 - **NFS exports (phase 2).** `POST /nfs` exports `/FILER/STORAGEnn/FOLDER` to a list of
   clients (IPv4 address, IPv4 CIDR or `*`), creating the folder with the configured owner and
   mode when it is missing; `PUT /nfs/{storage}/{folder}` replaces the client list;
@@ -75,6 +83,10 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 ## [0.1.1] — 2026-10-04
 
 ### Fixed
+- **Mount units start before nfs-server.** A storage's unit is now wanted by
+  `local-fs.target` (like an fstab entry) and ordered `Before=nfs-server.service`; with
+  `multi-user.target` alone it could start after nfs-server, whose `exportfs` then skipped
+  the still-missing paths and the exports were absent until the next `exportfs -ra`.
 - **PyPI project page links.** The README now uses absolute GitHub URLs, so the links to
   `DOC_DNS.md`, `DOC_VLAN.md`, the changelog and the release guide work on pypi.org instead
   of resolving to pages under the PyPI project; `[project.urls]` adds Homepage, Repository,

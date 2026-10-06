@@ -704,3 +704,20 @@ def test_full_lifecycle_add_export_grow_remove(client, host, filer, tmp_path):
     # the protected disk never saw a single command
     assert host.snapshot("sdb") == host.snapshot("sdb")
     assert not any("sdb" in " ".join(c) for c in host.mutating_calls)
+
+
+def test_mount_unit_is_in_local_fs_and_before_nfs_server(client, host, filer, tmp_path):
+    host.add_disk("sdd", 2 * T)
+    assert (
+        client.post("/storage", json={"disk": "sdd", "name": "STORAGE03"}).status_code
+        == 200
+    )
+    unit_dir = tmp_path / "etc" / "systemd" / "system"
+    [unit] = [p for p in unit_dir.iterdir() if p.name.endswith("STORAGE03.mount")]
+    text = unit.read_text()
+    # fstab mounts belong to local-fs.target and nfs-server orders itself after it; a
+    # unit wanted only by multi-user.target could start after nfs-server, whose
+    # exportfs would then skip the still-missing export paths.
+    assert "WantedBy=local-fs.target" in text
+    assert "Before=nfs-server.service" in text
+    assert "WantedBy=multi-user.target" not in text

@@ -12,6 +12,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ READ_ONLY: tuple[tuple[str, ...], ...] = (
     ("wipefs", "-n"),
     ("exportfs", "-v"),
     ("exportfs", "-s"),
+    ("showmount",),
     ("vgs",),
     ("lvs",),
     ("pvs",),
@@ -248,3 +250,34 @@ def human_size(size: int) -> str:
             return f"{int(value)}{unit}" if unit == "B" else f"{value:.1f}{unit}"
         value /= 1024
     return f"{value:.1f}P"
+
+
+# ── reading the audit log back ───────────────────────────────────────────────────────
+
+AUDIT_LINE = re.compile(
+    r"^\[(?P<time>[^\]]+)\] (?P<source>\S+) rc=(?P<rc>-?\d+) (?P<command>.*)$"
+)
+
+
+def audit_entries(limit: int = 50) -> list[dict]:
+    """The newest `limit` audit lines, newest first."""
+    try:
+        lines = AUDIT_LOG.read_text().splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in reversed(lines):
+        m = AUDIT_LINE.match(line)
+        if not m:
+            continue
+        out.append(
+            {
+                "time": m.group("time"),
+                "source": m.group("source"),
+                "rc": int(m.group("rc")),
+                "command": m.group("command"),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out

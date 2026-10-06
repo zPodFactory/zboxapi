@@ -109,3 +109,39 @@ def test_rescan_reads_new_sizes_of_every_disk_without_modifying_any(
     assert (
         host.disks["sdb"].parts[0].size == T - 2 * 1024**2
     )  # the partition is untouched
+
+
+# ── detach ───────────────────────────────────────────────────────────────────────────
+
+
+def test_detach_a_disk_that_is_not_in_use(client, host, tmp_path):
+    host.add_disk("sdd", 2 * T)
+    host.add_part("sdd", fstype="ext4", uuid="d")  # a leftover filesystem, not mounted
+    r = client.post("/disk/sdd/detach")
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "disk": "sdd",
+        "serial": "6000c29sdd",
+        "detached": True,
+        "message": "sdd removed from the kernel; "
+        "the virtual disk can now be removed from the VM",
+    }
+    assert "sdd" not in host.disks
+    assert client.get("/disk/sdd").status_code == 404
+    assert "block/sdd/device/delete" in (tmp_path / "audit.log").read_text()
+
+
+def test_detach_refusals(client, host, filer):
+    host.add_disk("sdc", 500 * G)
+    assert (
+        client.post("/storage", json={"disk": "sdc", "name": "STORAGE02"}).status_code
+        == 200
+    )
+    r = client.post("/disk/sdc/detach")
+    assert r.status_code == 409 and "remove STORAGE02 first" in r.json()["detail"]
+    r = client.post("/disk/sdb/detach")
+    assert r.status_code == 403 and "protected" in r.json()["detail"]
+    r = client.post("/disk/sda/detach")
+    assert r.status_code == 403 and "system disk" in r.json()["detail"]
+    assert client.post("/disk/sdz/detach").status_code == 404
+    assert set(host.disks) == {"sda", "sdb", "sdc"}
