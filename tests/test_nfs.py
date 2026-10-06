@@ -132,6 +132,7 @@ def test_export_create_makes_the_folder_and_reloads(client, host, filer, tmp_pat
         "path": f"{filer}/STORAGE01/NFS-06",
         "storage": "STORAGE01",
         "folder": "NFS-06",
+        "options": EXPORT_OPTS,
         "clients": [{"client": "10.60.60.0/26", "options": EXPORT_OPTS}],
         "owner": "user-defined",
         "protected": False,
@@ -442,3 +443,100 @@ def test_nfs_status(client, host, filer, tmp_path):
     }
     host.nfs_state = "inactive"
     assert client.get("/nfs/status").json()["service"] == "inactive"
+
+
+# ── per-export options ───────────────────────────────────────────────────────────────
+
+
+def test_export_options_default_to_config(client, host, filer, tmp_path):
+    r = client.post(
+        "/nfs", json={"storage": "STORAGE01", "folder": "NFS-06", "clients": ["*"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["options"] == EXPORT_OPTS
+    assert r.json()["clients"] == [{"client": "*", "options": EXPORT_OPTS}]
+
+
+def test_export_with_its_own_options(client, host, filer, tmp_path):
+    r = client.post(
+        "/nfs",
+        json={
+            "storage": "STORAGE01",
+            "folder": "ISO",
+            "clients": ["*"],
+            "options": "ro,no_subtree_check",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["options"] == "ro,no_subtree_check"
+    assert (
+        managed(tmp_path).splitlines()[-1]
+        == f"{filer}/STORAGE01/ISO *(ro,no_subtree_check)"
+    )
+    # adding a client inherits the export's options, not the default
+    r = client.post("/nfs/STORAGE01/ISO/client", json={"client": "10.60.60.0/26"})
+    assert [c["options"] for c in r.json()["clients"]] == ["ro,no_subtree_check"] * 2
+    # the live table reflects it
+    assert host.active_exports[f"{filer}/STORAGE01/ISO"] == ["*", "10.60.60.0/26"]
+
+
+def test_put_keeps_options_unless_given(client, host, filer, tmp_path):
+    body = {"clients": ["10.60.60.0/26"], "options": "rw,no_subtree_check,root_squash"}
+    assert client.put("/nfs/STORAGE01/NFS-07", json=body).status_code == 201
+    r = client.put("/nfs/STORAGE01/NFS-07", json={"clients": ["192.168.0.0/24"]})
+    assert r.status_code == 200
+    assert r.json()["options"] == "rw,no_subtree_check,root_squash"  # kept
+    r = client.put(
+        "/nfs/STORAGE01/NFS-07", json={"clients": ["192.168.0.0/24"], "options": "ro"}
+    )
+    assert r.json()["options"] == "ro"  # replaced
+    assert (
+        managed(tmp_path).splitlines()[-1]
+        == f"{filer}/STORAGE01/NFS-07 192.168.0.0/24(ro)"
+    )
+
+
+@pytest.mark.parametrize(
+    "options, message",
+    [
+        ("", "cannot be empty"),
+        ("rw,bogus", "Unknown or malformed export option 'bogus'"),
+        ("rw,sec=ntlm", "Unknown or malformed export option 'sec=ntlm'"),
+        ("ro,rw", "'ro' and 'rw' cannot both be given"),
+        ("rw,root_squash,no_root_squash", "cannot both be given"),
+        ("rw,rw", "Duplicate export option 'rw'"),
+        ("anonuid=abc", "malformed"),
+        ("rw;no_subtree_check", "malformed"),
+    ],
+)
+def test_export_options_validation(client, host, filer, options, message):
+    r = client.post(
+        "/nfs",
+        json={
+            "storage": "STORAGE01",
+            "folder": "X",
+            "clients": ["*"],
+            "options": options,
+        },
+    )
+    assert r.status_code == 422, r.text
+    assert message in r.text
+    assert not (filer / "STORAGE01" / "X").exists()
+
+
+def test_export_options_accept_values(client, host, filer):
+    r = client.post(
+        "/nfs",
+        json={
+            "storage": "STORAGE01",
+            "folder": "KRB",
+            "clients": ["10.0.0.0/8"],
+            "options": " rw, sync ,no_subtree_check,sec=krb5p:sys,"
+            "anonuid=65534,anongid=65534,fsid=12 ",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert (
+        r.json()["options"]
+        == "rw,sync,no_subtree_check,sec=krb5p:sys,anonuid=65534,anongid=65534,fsid=12"
+    )

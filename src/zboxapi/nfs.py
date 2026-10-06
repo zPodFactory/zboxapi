@@ -31,6 +31,7 @@ class ExportView(BaseModel):
     path: str
     storage: str | None
     folder: str | None
+    options: str  # what every client of this export gets
     clients: list[ClientView]
     owner: str  # system | user-defined
     protected: bool
@@ -141,6 +142,7 @@ def exports(ps: guard.ProtectedSet | None = None) -> list[ExportView]:
                 path=export_path,
                 storage=m.group("storage") if conventional else None,
                 folder=m.group("folder") if conventional else None,
+                options=clients[0].options if clients else "",
                 clients=clients,
                 owner=owner,
                 protected=export_path in ps.exports,
@@ -296,6 +298,80 @@ def validate_client(value: str) -> str:
 
 CLIENT = Annotated[str, AfterValidator(validate_client)]
 
+# exports(5) options this API accepts, and the pairs that cannot both be given
+EXPORT_OPTION_FLAGS = frozenset(
+    {
+        "ro",
+        "rw",
+        "sync",
+        "async",
+        "root_squash",
+        "no_root_squash",
+        "all_squash",
+        "no_all_squash",
+        "subtree_check",
+        "no_subtree_check",
+        "secure",
+        "insecure",
+        "wdelay",
+        "no_wdelay",
+        "crossmnt",
+        "hide",
+        "nohide",
+    }
+)
+EXPORT_OPTION_VALUES = {
+    "sec": re.compile(r"^(sys|krb5|krb5i|krb5p)(:(sys|krb5|krb5i|krb5p))*$"),
+    "anonuid": re.compile(r"^\d+$"),
+    "anongid": re.compile(r"^\d+$"),
+    "fsid": re.compile(r"^(\d+|root|[0-9a-fA-F-]{36})$"),
+}
+EXPORT_OPTION_CONFLICTS = (
+    ("ro", "rw"),
+    ("sync", "async"),
+    ("root_squash", "no_root_squash"),
+    ("all_squash", "no_all_squash"),
+    ("subtree_check", "no_subtree_check"),
+    ("secure", "insecure"),
+    ("wdelay", "no_wdelay"),
+    ("hide", "nohide"),
+)
+
+
+def validate_options(value: str) -> str:
+    """A comma-separated exports(5) option string from the allowlist, normalised."""
+    tokens = [t.strip() for t in value.split(",") if t.strip()]
+    if not tokens:
+        raise PydanticCustomError("value_error", "Export options cannot be empty")
+    seen: list[str] = []
+    for token in tokens:
+        key, _, val = token.partition("=")
+        if key in EXPORT_OPTION_FLAGS and not val:
+            pass
+        elif key in EXPORT_OPTION_VALUES and EXPORT_OPTION_VALUES[key].match(val):
+            pass
+        else:
+            raise PydanticCustomError(
+                "value_error",
+                f"Unknown or malformed export option '{token}'; allowed: "
+                + ", ".join(sorted(EXPORT_OPTION_FLAGS))
+                + ", sec=, anonuid=, anongid=, fsid=",
+            )
+        if token in seen:
+            raise PydanticCustomError(
+                "value_error", f"Duplicate export option '{token}'"
+            )
+        seen.append(token)
+    for a, b in EXPORT_OPTION_CONFLICTS:
+        if a in seen and b in seen:
+            raise PydanticCustomError(
+                "value_error", f"Export options '{a}' and '{b}' cannot both be given"
+            )
+    return ",".join(seen)
+
+
+OPTIONS = Annotated[str, AfterValidator(validate_options)]
+
 
 def _unique(clients: list[str]) -> list[str]:
     seen = set(clients)
@@ -311,10 +387,16 @@ class ExportCreate(BaseModel):
     storage: STORAGE_NAME
     folder: FOLDER_NAME
     clients: CLIENTS
+    options: OPTIONS | None = Field(
+        None, description="exports(5) options for every client; default from config"
+    )
 
 
 class ExportUpdate(BaseModel):
     clients: CLIENTS
+    options: OPTIONS | None = Field(
+        None, description="replace the options too; omitted keeps the current ones"
+    )
 
 
 class ClientAdd(BaseModel):
@@ -331,14 +413,18 @@ def export_options() -> str:
     return config.get("nfs", "export_options")
 
 
-def write_managed(table: dict[str, list[str]]) -> None:
+class Managed(BaseModel):
+    clients: list[str]
+    options: str
+
+
+def write_managed(table: dict[str, Managed]) -> None:
     """Rewrite the managed exports file atomically: temp file, fsync, rename."""
     path = managed_exports_file()
-    options = export_options()
     lines = [
-        f"{export_path} " + " ".join(f"{c}({options})" for c in clients)
-        for export_path, clients in table.items()
-        if clients
+        f"{export_path} " + " ".join(f"{c}({entry.options})" for c in entry.clients)
+        for export_path, entry in table.items()
+        if entry.clients
     ]
     text = "# Managed by zboxapi (/nfs). Change it through the API.\n" + "".join(
         line + "\n" for line in lines
@@ -356,9 +442,13 @@ def write_managed(table: dict[str, list[str]]) -> None:
     os.replace(tmp, path)
 
 
-def managed_table() -> dict[str, list[str]]:
+def managed_table() -> dict[str, Managed]:
     return {
-        p: [c.client for c in cs] for p, cs in read_file(managed_exports_file()).items()
+        p: Managed(
+            clients=[c.client for c in cs],
+            options=cs[0].options if cs else export_options(),
+        )
+        for p, cs in read_file(managed_exports_file()).items()
     }
 
 
@@ -442,9 +532,12 @@ def nfs_create(export_in: ExportCreate) -> ExportView:
         if path in table:
             raise HTTPException(status.HTTP_409_CONFLICT, f"{path} is already exported")
         ensure_folder(Path(storage.mountpoint) / export_in.folder, "nfs_create")
-        table[path] = list(export_in.clients)
+        options = export_in.options or export_options()
+        table[path] = Managed(clients=list(export_in.clients), options=options)
         write_managed(table)
-        system.audit(["export", path, *export_in.clients], 0, "nfs_create")
+        system.audit(
+            ["export", path, f"({options})", *export_in.clients], 0, "nfs_create"
+        )
         reload_exports("nfs_create")
     return view_of(path)
 
@@ -465,9 +558,14 @@ def nfs_update(
         if created:
             mounted = mounted_storage(storage)
             ensure_folder(Path(mounted.mountpoint) / folder, "nfs_update")
-        table[path] = list(export_in.clients)
+        options = export_in.options or (
+            table[path].options if not created else export_options()
+        )
+        table[path] = Managed(clients=list(export_in.clients), options=options)
         write_managed(table)
-        system.audit(["export", path, *export_in.clients], 0, "nfs_update")
+        system.audit(
+            ["export", path, f"({options})", *export_in.clients], 0, "nfs_update"
+        )
         reload_exports("nfs_update")
     if created:
         response.status_code = status.HTTP_201_CREATED
@@ -480,12 +578,12 @@ def nfs_client_add(storage: str, folder: str, client_in: ClientAdd) -> ExportVie
     path = mutable_export(storage, folder, must_exist=True)
     with system.storage_lock():
         table = managed_table()
-        if client_in.client in table[path]:
+        if client_in.client in table[path].clients:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 f"{client_in.client} is already a client of {path}",
             )
-        table[path].append(client_in.client)
+        table[path].clients.append(client_in.client)
         write_managed(table)
         system.audit(["export-client-add", path, client_in.client], 0, "nfs_client_add")
         reload_exports("nfs_client_add")
@@ -502,12 +600,12 @@ def nfs_client_remove(storage: str, folder: str, client: str):
     client = "*" if client in ("*", "<world>") else client
     with system.storage_lock():
         table = managed_table()
-        if client not in table[path]:
+        if client not in table[path].clients:
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, f"{client} is not a client of {path}"
             )
-        table[path].remove(client)
-        last = not table[path]
+        table[path].clients.remove(client)
+        last = not table[path].clients
         if last:
             del table[path]
         write_managed(table)
