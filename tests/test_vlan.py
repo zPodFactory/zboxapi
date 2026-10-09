@@ -470,3 +470,64 @@ def test_vlan_full_lifecycle(client, interfaces_dir, system):
     assert listing[2000]["gateway"] == "192.168.44.1/24"
     assert listing[2000]["status"] == "up"
     assert sorted(p.name for p in interfaces_dir.iterdir()) == ["eth1.2000.cfg"]
+
+
+# ── overlap: with VLANs and with every network already on the host ───────────────────
+
+
+def test_vlan_overlap_message_names_the_conflicting_vlan(
+    client, interfaces_dir, system
+):
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1000, "gateway": "10.10.20.1/24"}
+        ).status_code
+        == 200
+    )
+    system.add_link("eth1.1000", "up", "10.10.20.1/24")
+    for gateway in ("10.10.20.65/28", "10.10.20.0/24", "10.10.0.1/16"):
+        r = client.post("/vlan", json={"vlan": 1020, "gateway": gateway})
+        assert r.status_code == 400, (gateway, r.text)
+        detail = r.json()["detail"]
+        assert "overlaps with VLAN 1000 on eth1.1000 (10.10.20.1/24" in detail, detail
+        assert f"gateway {gateway}" in detail
+        assert not (interfaces_dir / "eth1.1020.cfg").exists()
+
+
+def test_vlan_cannot_reuse_the_base_or_management_interface_network(
+    client, interfaces_dir, system
+):
+    system.add_link("eth0", "up", "192.168.0.10/24")
+    system.add_link("eth1", "up", "10.60.60.1/26")
+    r = client.post("/vlan", json={"vlan": 1023, "gateway": "10.60.60.5/26"})
+    assert r.status_code == 400
+    assert "overlaps with interface eth1 (10.60.60.1/26" in r.json()["detail"]
+    r = client.post("/vlan", json={"vlan": 1023, "gateway": "192.168.0.129/25"})
+    assert r.status_code == 400
+    assert "overlaps with interface eth0 (192.168.0.10/24" in r.json()["detail"]
+    r = client.post("/vlan", json={"vlan": 1023, "gateway": "10.60.61.1/26"})
+    assert r.status_code == 200, r.text
+
+
+def test_vlan_update_to_its_own_live_network_is_allowed(client, interfaces_dir, system):
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1000, "gateway": "10.10.20.1/24"}
+        ).status_code
+        == 200
+    )
+    system.add_link("eth1.1000", "up", "10.10.20.1/24")
+    # shrinking inside its own network is not an overlap with itself
+    r = client.put("/vlan/1000", json={"gateway": "10.10.20.1/25"})
+    assert r.status_code == 200, r.text
+
+
+def test_host_networks_parses_ip_output(system):
+    import zboxapi.vlan as vlan_mod
+
+    system.add_link("eth0", "up", "192.168.0.10/24")
+    system.add_link("eth1", "up", "10.60.60.1/26")
+    assert vlan_mod.host_networks() == [
+        ("eth0", "192.168.0.10/24"),
+        ("eth1", "10.60.60.1/26"),
+    ]

@@ -107,6 +107,11 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   Changelog, Documentation and Issues to the PyPI sidebar.
 
 ### Changed
+- **VLAN overlap check covers the whole host.** A new or updated VLAN gateway may not overlap
+  any network already present: the other VLANs, and every IPv4 address on any interface,
+  `eth1` itself and `eth0` included (`10.10.20.64/28` inside `eth1.1000`'s `10.10.20.0/24`,
+  or a VLAN inside `eth1`'s own subnet, both answer 400). The message names the conflicting
+  VLAN or interface and its address instead of two normalised networks.
 - **Python 3.14 only.** `requires-python` is `>=3.14`; older interpreters are no longer
   supported or tested, since every zbox install is controlled. Install with
   `uv tool install zboxapi`, which fetches a managed 3.14 where the system Python is older.

@@ -149,8 +149,20 @@ Configuration file /etc/network/interfaces.d/eth1.2000.cfg deleted
 ### Gateway CIDR Validation
 - Must be valid IPv4 CIDR notation (e.g., `192.168.1.1/24`)
 - **Preserves the exact IP address provided** (no network address normalization)
-- **No network overlaps allowed between any VLANs**
+- **No network overlaps allowed with anything already on the host**: the other VLANs
+  (user-defined and system), and every IPv4 network configured on any interface, the base
+  interface (`eth1`) and the management interface (`eth0`) included
 - Uses the `ipaddress` Python module for validation
+
+A refused request names what it collides with:
+
+```
+POST /vlan {"vlan": 1020, "gateway": "10.10.20.65/28"}   while eth1.1000 carries 10.10.20.1/24
+→ 400 {"detail": "Network 10.10.20.64/28 (gateway 10.10.20.65/28) overlaps with VLAN 1000 on eth1.1000 (10.10.20.1/24, network 10.10.20.0/24)"}
+
+POST /vlan {"vlan": 1023, "gateway": "10.60.60.5/26"}    while eth1 itself carries 10.60.60.1/26
+→ 400 {"detail": "Network 10.60.60.0/26 (gateway 10.60.60.5/26) overlaps with interface eth1 (10.60.60.1/26, network 10.60.60.0/26)"}
+```
 
 ### Network Overlap Detection
 The system uses a comprehensive `check_no_overlap()` function that validates all VLAN networks simultaneously:

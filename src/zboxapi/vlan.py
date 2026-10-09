@@ -157,32 +157,60 @@ def check_no_overlap(cidrs):
     return True
 
 
+def host_networks() -> list[tuple[str, str]]:
+    """Every IPv4 address configured on the host as (interface, cidr), from
+    `ip -o -4 addr show`; the loopback left out."""
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show"], capture_output=True, text=True
+        )
+    except OSError:
+        return []
+    if result.returncode != 0:
+        return []
+    out = []
+    for line in result.stdout.splitlines():
+        # "3: eth1    inet 10.60.60.1/26 brd 10.60.60.63 scope global eth1\ ..."
+        m = re.match(r"^\d+:\s+(\S+)\s+inet\s+(\d+\.\d+\.\d+\.\d+/\d+)", line)
+        if m and m.group(1) != "lo":
+            out.append((m.group(1), m.group(2)))
+    return out
+
+
 def validate_vlan_networks(
     new_gateway: str, exclude_vlan_id: int | None = None
 ) -> None:
-    """Validate that a new gateway doesn't overlap with existing VLAN networks"""
-    # Get all existing VLAN gateways
-    existing_vlans = get_existing_vlans()
-    all_gateways = [new_gateway]  # Include the new gateway
+    """The new gateway's network may not overlap with any network already present on
+    the host: the configured VLANs (user-defined files and system VLANs) and every
+    IPv4 address on any interface, the base interface and eth0 included."""
+    interface_name = get_interface_name()
+    excluded = f"{interface_name}.{exclude_vlan_id}" if exclude_vlan_id else None
+    new_net = ipaddress.ip_network(new_gateway, strict=False)
 
-    for vlan in existing_vlans:
-        # Skip the VLAN we're updating (if this is an update operation)
+    taken: list[tuple[str, str]] = []  # (what, cidr)
+    for vlan in get_existing_vlans():
         if exclude_vlan_id is not None and vlan.vlan == exclude_vlan_id:
             continue
         # System VLANs whose interface has no address carry a placeholder
-        # ("system-default" / "system-zpod") instead of a CIDR: nothing to
-        # compare against, so leave them out of the overlap check.
+        # ("system-default" / "system-zpod") instead of a CIDR: nothing to compare.
         try:
             ipaddress.ip_network(vlan.gateway, strict=False)
         except ValueError:
             continue
-        all_gateways.append(vlan.gateway)
+        taken.append((f"VLAN {vlan.vlan} on {vlan.interface}", vlan.gateway))
+    known_ifaces = {what.split(" on ", 1)[1] for what, _ in taken}
+    for iface, cidr in host_networks():
+        if iface == excluded or iface in known_ifaces:
+            continue
+        taken.append((f"interface {iface}", cidr))
 
-    # Check for overlaps
-    try:
-        check_no_overlap(all_gateways)
-    except ValueError as e:
-        raise NetworkError(f"Network overlap detected: {e}") from e
+    for what, cidr in taken:
+        other = ipaddress.ip_network(cidr, strict=False)
+        if new_net.overlaps(other):
+            raise NetworkError(
+                f"Network {new_net} (gateway {new_gateway}) overlaps with {what} "
+                f"({cidr}, network {other})"
+            )
 
 
 VLAN_ID = Annotated[int, AfterValidator(validate_vlan_id)]

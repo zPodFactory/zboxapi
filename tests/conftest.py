@@ -89,6 +89,13 @@ class FakeSystem:
                 if iface in self.addresses:
                     out += f"    inet {self.addresses[iface]} scope global {iface}\n"
                 return 0, out, ""
+            case ["ip", "-o", "-4", "addr", "show"]:
+                lines = [
+                    f"{i}: {name}    inet {cidr} brd 0.0.0.0 scope global {name}"
+                    "\\       valid_lft forever preferred_lft forever"
+                    for i, (name, cidr) in enumerate(self.addresses.items(), 2)
+                ]
+                return 0, "".join(ln + "\n" for ln in lines), ""
             case ["ip", "link", "set", iface, state]:
                 if iface not in self.links:
                     return 1, "", f'Cannot find device "{iface}"'
