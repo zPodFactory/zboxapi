@@ -226,6 +226,7 @@ class StorageAdopt(BaseModel):
 
 class OperationResult(BaseModel):
     operation: str
+    name: str  # the storage the operation targets (chosen by the API when not given)
     dry_run: bool
     storage: StorageView | None = None
     steps: list[ops.StepView]
@@ -653,12 +654,17 @@ def plan_delete(name: str) -> ops.Plan:
 
 
 def run_plan(
-    plan: ops.Plan, *, dry_run: bool, verbose: bool, failure: str = "{error}"
+    plan: ops.Plan,
+    name: str,
+    *,
+    dry_run: bool,
+    verbose: bool,
+    failure: str = "{error}",
 ) -> OperationResult:
     """`failure` formats the 500 message; `{error}` is the failing step's error."""
     if dry_run:
         return OperationResult(
-            operation=plan.name, dry_run=True, steps=plan.views(verbose)
+            operation=plan.name, name=name, dry_run=True, steps=plan.views(verbose)
         )
     try:
         steps = plan.execute(verbose)
@@ -671,7 +677,7 @@ def run_plan(
                 "rollback": [s.model_dump(exclude_unset=True) for s in e.rollback],
             },
         ) from e
-    return OperationResult(operation=plan.name, dry_run=False, steps=steps)
+    return OperationResult(operation=plan.name, name=name, dry_run=False, steps=steps)
 
 
 @storage_router.post(
@@ -683,7 +689,7 @@ def storage_create(
     """Partition, (LVM), format and mount a blank disk as a new storage"""
     with system.storage_lock():
         plan, name = plan_create(body)
-        result = run_plan(plan, dry_run=dry_run, verbose=verbose)
+        result = run_plan(plan, name, dry_run=dry_run, verbose=verbose)
         if not dry_run:
             result.storage = get_storage(name)
     return result
@@ -698,7 +704,7 @@ def storage_adopt(
     """Mount an existing ext4 filesystem as a storage, without formatting"""
     with system.storage_lock():
         plan, name = plan_adopt(body)
-        result = run_plan(plan, dry_run=dry_run, verbose=verbose)
+        result = run_plan(plan, name, dry_run=dry_run, verbose=verbose)
         if not dry_run:
             result.storage = get_storage(name)
     return result
@@ -715,6 +721,7 @@ def storage_grow(
         plan, node, before = plan_grow(name)
         result = run_plan(
             plan,
+            name,
             dry_run=dry_run,
             verbose=verbose,
             failure=f"Cannot grow {name}: {{error}}. The data is untouched and the "
@@ -744,7 +751,7 @@ def storage_delete(
     with system.storage_lock():
         storage = get_storage(name)
         plan = plan_delete(name)
-        result = run_plan(plan, dry_run=dry_run, verbose=verbose)
+        result = run_plan(plan, name, dry_run=dry_run, verbose=verbose)
         if not dry_run:
             nodes = system.block_devices()
             if disk := find_disk(storage.disk, nodes):

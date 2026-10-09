@@ -332,6 +332,7 @@ def test_create_raw_storage(client, host, filer, tmp_path):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["operation"] == "storage_create" and body["dry_run"] is False
+    assert body["name"] == "STORAGE03"
     assert names(body["steps"]) == [
         ("partition", "done"),
         ("settle", "done"),
@@ -403,6 +404,7 @@ def test_create_dry_run_changes_nothing(client, host, filer):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["dry_run"] is True and "storage" not in body
+    assert body["name"] == "STORAGE02"  # chosen by the API, stated up front
     assert all(s["status"] == "planned" for s in body["steps"])
     assert all(s["exit_code"] is None for s in body["steps"])  # same shape, nothing ran
     assert any(s["command"].startswith("vgcreate vg_storage02") for s in body["steps"])
@@ -755,3 +757,27 @@ def test_delete_keeps_a_mountpoint_someone_wrote_into(client, host, filer, tmp_p
     assert dict(names(r.json()["steps"]))["mountpoint"] == "skipped"
     assert (filer / "STORAGE03" / "stray").exists()
     assert client.get("/storage/STORAGE03").status_code == 404
+
+
+def test_auto_name_skips_mounted_storages_and_can_be_forced(client, host, filer):
+    # STORAGE01 is mounted, so the next free number is 02; with 02 mounted it is 03
+    host.add_disk("sdc", 500 * G)
+    host.add_disk("sdd", 500 * G)
+    host.add_disk("sde", 500 * G)
+    r = client.post("/storage?dry_run=true", json={"disk": "sdc"})
+    assert r.json()["name"] == "STORAGE02"
+    assert client.post("/storage", json={"disk": "sdc"}).json()["name"] == "STORAGE02"
+    assert (
+        client.post("/storage?dry_run=true", json={"disk": "sdd"}).json()["name"]
+        == "STORAGE03"
+    )
+    r = client.post("/storage", json={"disk": "sdd", "name": "STORAGE07"})
+    assert r.status_code == 200 and r.json()["name"] == "STORAGE07"
+    assert (
+        client.post("/storage?dry_run=true", json={"disk": "sde"}).json()["name"]
+        == "STORAGE03"
+    )
+    assert (
+        client.post("/storage", json={"disk": "sde", "name": "STORAGE07"}).status_code
+        == 409
+    )

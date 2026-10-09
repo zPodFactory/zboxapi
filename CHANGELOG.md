@@ -52,6 +52,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   applies to every client of the export, a client added later inherits it, and PUT without
   it keeps the current one. Omitted on create, the configured `export_options` applies as
   before. The export view carries `options` next to the per-client echo.
+- **Operation responses carry `name`**, the storage they target, so a dry run states the
+  number the API picked when `name` was omitted.
 - **Every step carries `exit_code`** in the operation responses, verbose or not: the
   command's exit status once it ran, `null` in a dry run, so both have the same shape.
 - **`GET /nfs/status`**: nfs-server state, NFS versions served, nfsd threads, exports served

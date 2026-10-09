@@ -143,6 +143,7 @@ Create, adopt, grow and delete run as a plan of named steps and answer with it:
 ```json
 {
   "operation": "storage_create",
+  "name": "STORAGE02",
   "dry_run": false,
   "steps": [
     {"step": "partition",  "target": "/dev/sdc",          "detail": "GPT label, one Linux LVM partition", "status": "done"},
@@ -207,7 +208,10 @@ in reverse order and the 500 response carries `message`, `steps` and `rollback`.
 { "disk": "sdc", "lvm": true, "name": "STORAGE02" }
 ```
 
-`name` is optional and defaults to the next free number. `lvm` defaults to false.
+`name` is optional: omitted, the API takes the next free number after the storages mounted
+under `/FILER`, counting from `STORAGE02`, and states it in the response's `name` field, in a
+dry run as well. An orchestrator creating several storages should pass `name` itself, since
+the automatic number is chosen at call time. `lvm` defaults to false.
 
 Steps: `sfdisk` writes a GPT label with one partition (type Linux filesystem, or Linux LVM),
 `udevadm settle` and `partx -u` make the kernel see it, then for LVM `pvcreate`, `vgcreate
@@ -240,6 +244,7 @@ After the virtual disk was enlarged in vSphere. Every step is online; clients ke
 ```json
 {
   "operation": "storage_grow",
+  "name": "STORAGE02",
   "dry_run": false,
   "changed": true,
   "before": {"disk_bytes": 536870912000, "partition_bytes": 536868814848, "lv_bytes": 536864620544, "filesystem_bytes": 527430156288},
