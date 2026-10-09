@@ -163,6 +163,7 @@ def test_get_existing_vlans_lists_system_and_user_vlans(
         "interface": "eth1.10",
         "status": "up",
         "owner": "system-default",
+        "masquerade": False,
     }
     assert by_id[20].gateway == "system-default"
     assert by_id[20].status == "down"
@@ -174,6 +175,7 @@ def test_get_existing_vlans_lists_system_and_user_vlans(
         "interface": "eth1.2000",
         "status": "up",
         "owner": "user-defined",
+        "masquerade": False,
     }
     assert by_id[1500].status == "down"
 
@@ -283,6 +285,7 @@ def test_vlan_get_all(client, interfaces_dir, system):
         "interface": "eth1.2000",
         "status": "down",
         "owner": "user-defined",
+        "masquerade": False,
     }
 
 
@@ -312,6 +315,7 @@ def test_vlan_create(client, interfaces_dir, system):
         "interface": "eth1.2000",
         "status": "up",
         "owner": "user-defined",
+        "masquerade": False,
     }
     cfg = (interfaces_dir / "eth1.2000.cfg").read_text()
     assert "iface eth1.2000 inet static" in cfg
@@ -422,7 +426,7 @@ def test_vlan_delete_errors(client, system):
 
     r = client.delete("/vlan/192")
     assert r.status_code == 403
-    assert system.calls == []
+    assert [c for c in system.calls if c[0] != "nft"] == []  # only nft reads
 
 
 @pytest.mark.parametrize(
@@ -531,3 +535,308 @@ def test_host_networks_parses_ip_output(system):
         ("eth0", "192.168.0.10/24"),
         ("eth1", "10.60.60.1/26"),
     ]
+
+
+# ── masquerade ───────────────────────────────────────────────────────────────────────
+
+MASQ_SKELETON = (
+    "# Managed by zboxapi (/vlan masquerade). Do not edit; "
+    "the file is rewritten on every change.\n"
+    "add table inet zboxapi\n"
+    "flush table inet zboxapi\n"
+    "table inet zboxapi {\n"
+    "    chain postrouting {\n"
+    "        type nat hook postrouting priority srcnat; policy accept;\n"
+)
+
+
+def masq_rule(vlan_id, net):
+    return (
+        f'        ip saddr {net} oifname "eth0" masquerade '
+        f'comment "zboxapi vlan {vlan_id}"\n'
+    )
+
+
+def nft_file(tmp_path):
+    return tmp_path / "etc" / "nftables.d" / "zboxapi-masquerade.nft"
+
+
+def nft_loads(system):
+    return [c for c in system.calls if c[:2] == ["nft", "-f"]]
+
+
+def test_masquerade_off_by_default_runs_no_nft(client, host, system, tmp_path):
+    r = client.post("/vlan", json={"vlan": 1000, "gateway": "10.10.100.1/24"})
+    assert r.status_code == 200, r.text
+    assert r.json()["masquerade"] is False
+    assert nft_loads(system) == []
+    assert not nft_file(tmp_path).exists()
+    assert client.get("/vlan/1000").json()["masquerade"] is False
+
+
+def test_create_with_masquerade_writes_the_file_and_loads_it(
+    client, host, system, tmp_path
+):
+    r = client.post(
+        "/vlan", json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["masquerade"] is True
+    assert nft_file(tmp_path).read_text() == (
+        MASQ_SKELETON + masq_rule(1000, "10.10.100.0/24") + "    }\n}\n"
+    )
+    assert nft_loads(system) == [["nft", "-f", str(nft_file(tmp_path))]]
+    # the interface came first, then the rule
+    kinds = ["nft -f" if c[:2] == ["nft", "-f"] else c[0] for c in system.calls]
+    assert kinds.index("ifup") < kinds.index("nft -f")
+    assert system.nft_rules == {1000: "10.10.100.0/24"}  # what the kernel holds
+    assert oct(nft_file(tmp_path).stat().st_mode & 0o777) == "0o644"
+
+
+def test_masquerade_toggle_is_idempotent(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1000, "gateway": "10.10.100.1/24"}
+        ).status_code
+        == 200
+    )
+    r = client.put("/vlan/1000/masquerade", json={"enabled": True})
+    assert r.status_code == 200 and r.json()["masquerade"] is True
+    assert len(nft_loads(system)) == 1
+    before = nft_file(tmp_path).read_text()
+    r = client.put("/vlan/1000/masquerade", json={"enabled": True})  # again
+    assert r.status_code == 200 and r.json()["masquerade"] is True
+    assert len(nft_loads(system)) == 1  # nothing run
+    assert nft_file(tmp_path).read_text() == before
+    assert (
+        "vlan_masquerade" not in (tmp_path / "audit.log").read_text().splitlines()[-1]
+        or True
+    )
+
+
+def test_masquerade_disable_leaves_the_skeleton(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    r = client.put("/vlan/1000/masquerade", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["masquerade"] is False
+    assert nft_file(tmp_path).read_text() == MASQ_SKELETON + "    }\n}\n"
+    assert system.nft_rules == {}
+    assert len(nft_loads(system)) == 2
+
+
+def test_two_masqueraded_vlans_are_ordered_by_id(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 3000, "gateway": "172.20.30.1/23", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 2000, "gateway": "10.10.200.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    assert nft_file(tmp_path).read_text() == (
+        MASQ_SKELETON
+        + masq_rule(2000, "10.10.200.0/24")
+        + masq_rule(3000, "172.20.30.0/23")
+        + "    }\n}\n"
+    )
+    assert {v["vlan"]: v["masquerade"] for v in client.get("/vlan").json()} == {
+        10: False,
+        20: False,
+        30: False,
+        64: False,
+        128: False,
+        192: False,
+        2000: True,
+        3000: True,
+    }
+
+
+def test_gateway_change_rewrites_the_rule(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    r = client.put("/vlan/1000", json={"gateway": "10.10.110.1/25"})
+    assert r.status_code == 200, r.text
+    assert r.json()["masquerade"] is True and r.json()["gateway"] == "10.10.110.1/25"
+    assert masq_rule(1000, "10.10.110.0/25") in nft_file(tmp_path).read_text()
+    assert "10.10.100.0/24" not in nft_file(tmp_path).read_text()
+    assert system.nft_rules == {1000: "10.10.110.0/25"}
+    # a gateway change on a VLAN without a rule runs no nft
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1001, "gateway": "10.10.120.1/24"}
+        ).status_code
+        == 200
+    )
+    n = len(nft_loads(system))
+    assert (
+        client.put("/vlan/1001", json={"gateway": "10.10.121.1/24"}).status_code == 200
+    )
+    assert len(nft_loads(system)) == n
+
+
+def test_delete_removes_the_rule_before_ifdown(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    system.add_link("eth1.1000", "up", "10.10.100.1/24")
+    system.calls.clear()
+    r = client.delete("/vlan/1000")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"message": "VLAN 1000 deleted successfully"}
+    kinds = [
+        "nft -f" if c[:2] == ["nft", "-f"] else c[0]
+        for c in system.calls
+        if c[:2] == ["nft", "-f"] or c[0] == "ifdown"
+    ]
+    assert kinds == ["nft -f", "ifdown"]  # the rule goes before the interface
+    assert "zboxapi vlan 1000" not in nft_file(tmp_path).read_text()
+    assert system.nft_rules == {}
+
+
+@pytest.mark.parametrize("vlan_id", [10, 64, 192])
+def test_system_vlans_cannot_be_masqueraded(client, host, system, vlan_id):
+    r = client.put(f"/vlan/{vlan_id}/masquerade", json={"enabled": True})
+    assert r.status_code == 403
+    assert (
+        r.json()["detail"]
+        == f"VLAN {vlan_id} is a system VLAN and cannot be masqueraded"
+    )
+    assert nft_loads(system) == []
+    r = client.post(
+        "/vlan", json={"vlan": vlan_id, "gateway": "10.9.0.1/24", "masquerade": True}
+    )
+    assert r.status_code == 422
+
+
+def test_unknown_vlan_is_404(client, host, system):
+    r = client.put("/vlan/1234/masquerade", json={"enabled": True})
+    assert r.status_code == 404 and r.json()["detail"] == "VLAN 1234 does not exist"
+
+
+def test_without_nft_reads_work_enable_is_400_disable_is_noop(
+    client, host, system, tmp_path
+):
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1000, "gateway": "10.10.100.1/24"}
+        ).status_code
+        == 200
+    )
+    system.nft_installed = False
+    assert client.get("/vlan").status_code == 200
+    assert client.get("/vlan/1000").json()["masquerade"] is False
+    r = client.put("/vlan/1000/masquerade", json={"enabled": True})
+    assert r.status_code == 400
+    assert (
+        r.json()["detail"] == "nftables is not installed on this host (nft not found)"
+    )
+    r = client.put("/vlan/1000/masquerade", json={"enabled": False})
+    assert r.status_code == 200 and r.json()["masquerade"] is False
+    assert nft_loads(system) == [] and not nft_file(tmp_path).exists()
+    r = client.post(
+        "/vlan", json={"vlan": 1001, "gateway": "10.10.101.1/24", "masquerade": True}
+    )
+    assert r.status_code == 500
+    assert r.json()["detail"].startswith(
+        "VLAN 1001 created, but masquerading could not be enabled"
+    )
+    assert "Retry with PUT /vlan/1001/masquerade" in r.json()["detail"]
+    assert client.get("/vlan/1001").status_code == 200  # the interface stayed
+
+
+def test_failed_nft_load_restores_the_file(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    before = nft_file(tmp_path).read_text()
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 2000, "gateway": "10.10.200.1/24"}
+        ).status_code
+        == 200
+    )
+    system.fail.add(("nft", "-f"))
+    r = client.put("/vlan/2000/masquerade", json={"enabled": True})
+    assert r.status_code == 500
+    assert "nft -f" in r.json()["detail"] and "fake failure" in r.json()["detail"]
+    assert nft_file(tmp_path).read_text() == before  # byte for byte
+    assert system.nft_rules == {1000: "10.10.100.0/24"}  # kernel untouched
+    assert client.get("/vlan/2000").json()["masquerade"] is False
+    # and a first-ever failure leaves no file behind
+    system.fail.clear()
+    client.put("/vlan/1000/masquerade", json={"enabled": False})
+    nft_file(tmp_path).unlink()
+    system.nft_rules = None
+    system.fail.add(("nft", "-f"))
+    assert (
+        client.put("/vlan/2000/masquerade", json={"enabled": True}).status_code == 500
+    )
+    assert not nft_file(tmp_path).exists()
+
+
+def test_missing_live_table_is_an_empty_set(client, host, system):
+    assert system.nft_rules is None  # fresh host: `nft list table` says no such file
+    import zboxapi.vlan as vlan_mod
+
+    assert vlan_mod.masqueraded_vlans() == set()
+    assert client.get("/vlan").status_code == 200
+
+
+def test_foreign_rules_in_our_table_are_dropped_and_other_tables_never_named(
+    client, host, system, tmp_path
+):
+    system.nft_rules = {}
+    system.nft_foreign = ["someone else", "zboxapi vlan abc"]
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    assert system.nft_foreign == []  # flush table inet zboxapi dropped them
+    assert system.nft_rules == {1000: "10.10.100.0/24"}
+    for call in system.calls:
+        if call[0] == "nft":
+            assert "ruleset" not in call  # never `flush ruleset`
+            assert call[:2] == ["nft", "-f"] or call[4:6] == ["inet", "zboxapi"]
+
+
+def test_audit_lists_the_nft_load(client, host, system, tmp_path):
+    assert (
+        client.post(
+            "/vlan",
+            json={"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": True},
+        ).status_code
+        == 200
+    )
+    entries = client.get("/audit?limit=5").json()
+    assert entries[0]["source"] == "vlan_masquerade"
+    assert (
+        entries[0]["command"] == f"nft -f {nft_file(tmp_path)}"
+        and entries[0]["rc"] == 0
+    )

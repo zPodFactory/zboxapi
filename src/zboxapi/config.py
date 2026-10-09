@@ -19,6 +19,11 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "mkfs_options": "-m 0 -E lazy_itable_init=0,lazy_journal_init=0",
         "mount_options": "defaults,noatime,nofail",
     },
+    "masquerade": {
+        "out_interface": "eth0",
+        "nft_file": "/etc/nftables.d/zboxapi-masquerade.nft",
+        "table": "zboxapi",
+    },
     "nfs": {
         "exports_file": "/etc/exports.d/zboxapi.exports",
         "system_exports_file": "/etc/exports",

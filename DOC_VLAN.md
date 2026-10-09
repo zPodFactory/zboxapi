@@ -52,9 +52,13 @@ Creates a new VLAN interface with the specified VLAN ID and gateway.
     "vlan": 2000,
     "gateway": "192.168.42.129/25",
     "interface": "eth1.2000",
-    "status": "up"
+    "status": "up",
+    "owner": "user-defined",
+    "masquerade": false
 }
 ```
+
+`masquerade` is optional in the request (default `false`), see "Masquerade" below.
 
 ### 2. List All VLAN Interfaces
 **GET** `/vlan`
@@ -68,13 +72,17 @@ Returns all configured VLAN interfaces.
         "vlan": 2000,
         "gateway": "192.168.42.129/25",
         "interface": "eth1.2000",
-        "status": "up"
+        "status": "up",
+        "owner": "user-defined",
+        "masquerade": true
     },
     {
         "vlan": 3000,
         "gateway": "10.10.10.1/24",
         "interface": "eth1.3000",
-        "status": "down"
+        "status": "down",
+        "owner": "user-defined",
+        "masquerade": false
     }
 ]
 ```
@@ -90,7 +98,9 @@ Returns information about a specific VLAN interface.
     "vlan": 2000,
     "gateway": "192.168.42.129/25",
     "interface": "eth1.2000",
-    "status": "up"
+    "status": "up",
+    "owner": "user-defined",
+    "masquerade": true
 }
 ```
 
@@ -112,9 +122,13 @@ Updates the gateway configuration for a specific VLAN interface.
     "vlan": 2000,
     "gateway": "192.168.66.1/24",
     "interface": "eth1.2000",
-    "status": "up"
+    "status": "up",
+    "owner": "user-defined",
+    "masquerade": true
 }
 ```
+
+If the VLAN is masqueraded, its rule follows the new subnet in the same request.
 
 ### 5. Delete VLAN Interface
 **DELETE** `/vlan/{vlan_id}`
@@ -137,6 +151,91 @@ Deletes a VLAN interface configuration and removes the interface from the system
 Interface eth1.2000 brought down
 Configuration file /etc/network/interfaces.d/eth1.2000.cfg deleted
 ```
+
+### 6. Masquerade a VLAN
+**PUT** `/vlan/{vlan_id}/masquerade`
+
+```json
+{ "enabled": true }
+```
+
+Answers the `VlanView` with **200** whether or not anything changed, so it is safe to repeat.
+`{"enabled": false}` removes the rule. 403 for a system VLAN, 404 for a VLAN that does not
+exist, 400 when nftables is not installed and `enabled` is true, 500 with `nft`'s error when
+the load fails (the file is restored first).
+
+## Masquerade
+
+A user VLAN can be *masqueraded*: packets from its subnet that leave zcore on the management
+interface (`eth0`) get zcore's management address as source, so VMs on that VLAN reach the
+factory network and whatever it reaches, while nothing can reach them from outside. Traffic
+between zcore's own VLANs is never translated. This is source NAT to the outgoing interface's
+address and nothing else: no DNAT, no port forwarding, nothing on the NSX side. A network is
+either masqueraded or routed globally by the orchestrator, never both; that rule lives in
+zpodcore, not here.
+
+- Off by default. `POST /vlan` with `"masquerade": true`, or `PUT /vlan/{id}/masquerade` later.
+- System VLANs are never masqueraded: 403, like every other change to them.
+- `DELETE /vlan/{id}` removes the rule before the interface goes down. A gateway change
+  rewrites the rule for the new subnet. `enable`/`disable` of the interface leave the rule alone.
+- `masquerade` in every response is read from the live nftables table, never assumed.
+
+### The file and the rules
+
+One nftables table, one chain, one rule per masqueraded VLAN, in one file zboxapi owns:
+`/etc/nftables.d/zboxapi-masquerade.nft`. Rewritten whole on every change (temp file, fsync,
+rename, mode 0644), then loaded live with `nft -f`. `add table` plus `flush table` make the
+load idempotent and leave every other table on the host alone; `table inet zboxapi` belongs
+to zboxapi and anything added to it by hand disappears at the next change.
+
+```
+# Managed by zboxapi (/vlan masquerade). Do not edit; the file is rewritten on every change.
+add table inet zboxapi
+flush table inet zboxapi
+table inet zboxapi {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr 10.10.100.0/24 oifname "eth0" masquerade comment "zboxapi vlan 1000"
+        ip saddr 10.10.200.0/24 oifname "eth0" masquerade comment "zboxapi vlan 2000"
+    }
+}
+```
+
+The network is the VLAN's gateway normalised (`10.10.100.1/24` → `10.10.100.0/24`); the rule
+stores no address of `eth0`, so it follows whatever address the interface has. With zero
+masqueraded VLANs the file still holds the table and chain: that is what "nothing masqueraded"
+looks like. Every `nft -f` run is in the audit log (`GET /audit`, source `vlan_masquerade`).
+
+### Example
+
+```
+POST /vlan  {"vlan": 1000, "gateway": "10.10.100.1/24", "masquerade": true}   → masquerade: true
+POST /vlan  {"vlan": 2000, "gateway": "10.10.200.1/24"}                       → masquerade: false
+PUT  /vlan/2000/masquerade  {"enabled": true}                                 → masquerade: true
+PUT  /vlan/1000/masquerade  {"enabled": false}                                → masquerade: false
+DELETE /vlan/2000                                                             → rule removed, then ifdown
+```
+
+A VM at 10.10.100.42 reaching 10.196.64.10 shows in conntrack as translated to zcore's
+management address on the way out and un-translated on the way back; a VM on an unmasqueraded
+VLAN leaves with its own source and gets no reply, which is the "scoped to the zPod" default.
+
+### Configuration (`[masquerade]`, every key optional)
+
+```ini
+[masquerade]
+out_interface = eth0                              # where translated traffic leaves zcore
+nft_file = /etc/nftables.d/zboxapi-masquerade.nft # the one file zboxapi writes
+table = zboxapi                                   # nftables table name (family inet)
+```
+
+### What zcore needs
+
+`nft` (package `nftables`) for the live effect; without it `GET /vlan` still works and reports
+`masquerade: false`, enabling answers 400. For the rules to survive a reboot the appliance must
+load the file at boot: `/etc/nftables.conf` with `include "/etc/nftables.d/*.nft"` and
+`nftables.service` enabled. That is packer-zcore's part; zboxapi applies its file directly and
+does not depend on it for the live effect.
 
 ## Validation Rules
 
@@ -243,7 +342,7 @@ iface eth1.2000 inet static
 The API provides comprehensive error handling with proper HTTP status codes:
 
 - **400 Bad Request**: Validation errors (invalid VLAN ID, network overlaps, etc.)
-- **403 Forbidden**: Attempting to modify system VLANs (default: 10,20,30 or zPod: 0,64,128,192)
+- **403 Forbidden**: Attempting to modify or masquerade system VLANs (default: 10,20,30 or zPod: 64,128,192)
 - **404 Not Found**: VLAN interface does not exist
 - **500 Internal Server Error**: System configuration or network errors
 

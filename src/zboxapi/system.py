@@ -33,6 +33,8 @@ READ_ONLY: tuple[tuple[str, ...], ...] = (
     ("exportfs", "-v"),
     ("exportfs", "-s"),
     ("showmount",),
+    ("nft", "-j", "list"),
+    ("nft", "list"),
     ("vgs",),
     ("lvs",),
     ("pvs",),

@@ -42,6 +42,13 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `DELETE` removes a folder when it is empty and not exported, or with everything in it
   when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
   answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
+- **Masquerade option on VLAN interfaces.** `POST /vlan` takes `masquerade: true` and
+  `PUT /vlan/{id}/masquerade` toggles it: one nftables rule per VLAN in
+  `/etc/nftables.d/zboxapi-masquerade.nft`, source-translating traffic that leaves on the
+  management interface, so a VLAN scoped to the zPod can reach out without being routed from
+  outside. Off by default; system VLANs refused; `masquerade` in every VLAN response is read
+  from the live table. The rule follows a gateway change and goes before the interface on
+  delete. Without `nft`, reads work and enabling answers 400.
 - **Sizes are bytes, named as such.** `size_bytes`, `used_bytes`, `available_bytes` on
   storages, `size_bytes` on disks and partitions, `before_bytes`/`after_bytes` on a rescan,
   `*_bytes` keys in a grow's before/after. No human-readable size fields: formatting belongs

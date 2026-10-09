@@ -105,7 +105,9 @@ def test_storage_folders(client, host, filer):
 def test_folder_create_with_defaults_from_config(client, host, filer, tmp_path):
     # defaults: folder_owner root:root would fail as non-root, so point config at us
     conf = tmp_path / "etc" / "zboxapi.conf"
-    conf.write_text(conf.read_text() + "folder_mode = 0775\n")
+    conf.write_text(
+        conf.read_text().replace("[masquerade]", "folder_mode = 0775\n[masquerade]")
+    )
     r = client.post("/storage/STORAGE01/NFS-06")
     assert r.status_code == 200, r.text
     assert r.json() == {

@@ -2,9 +2,12 @@
 authenticated TestClient. No test touches /etc or runs real system commands."""
 
 import grp
+import json
 import os
 import pwd
+import re
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -42,6 +45,11 @@ class FakeSystem:
         self.links: dict[str, str] = {}  # interface -> "up" | "down"
         self.addresses: dict[str, str] = {}  # interface -> CIDR
         self.fail: set[tuple[str, ...]] = set()  # command prefixes that fail
+        # nftables model: the live rules of table inet zboxapi, vlan id -> network;
+        # None means the table does not exist yet (fresh host)
+        self.nft_rules: dict[int, str] | None = None
+        self.nft_foreign: list[str] = []  # rule comments not ours, in our table
+        self.nft_installed = True
 
     # -- helpers used by tests -------------------------------------------
     def add_link(self, name: str, state: str = "up", address: str | None = None):
@@ -89,6 +97,88 @@ class FakeSystem:
                 if iface in self.addresses:
                     out += f"    inet {self.addresses[iface]} scope global {iface}\n"
                 return 0, out, ""
+            case ["nft", "-j", "list", "table", "inet", table]:
+                if self.nft_rules is None:
+                    return (
+                        1,
+                        "",
+                        f"Error: No such file or directory\nlist table inet {table}",
+                    )
+                items = [{"metainfo": {"version": "1.1.3", "json_schema_version": 1}}]
+                items.append({"table": {"family": "inet", "name": table, "handle": 1}})
+                items.append(
+                    {
+                        "chain": {
+                            "family": "inet",
+                            "table": table,
+                            "name": "postrouting",
+                            "handle": 1,
+                            "type": "nat",
+                            "hook": "postrouting",
+                            "prio": 100,
+                            "policy": "accept",
+                        }
+                    }
+                )
+                for vlan_id, net in sorted(self.nft_rules.items()):
+                    items.append(
+                        {
+                            "rule": {
+                                "family": "inet",
+                                "table": table,
+                                "chain": "postrouting",
+                                "handle": 10 + vlan_id,
+                                "comment": f"zboxapi vlan {vlan_id}",
+                                "expr": [
+                                    {
+                                        "match": {
+                                            "op": "==",
+                                            "left": {
+                                                "payload": {
+                                                    "protocol": "ip",
+                                                    "field": "saddr",
+                                                }
+                                            },
+                                            "right": {
+                                                "prefix": {
+                                                    "addr": net.split("/")[0],
+                                                    "len": int(net.split("/")[1]),
+                                                }
+                                            },
+                                        }
+                                    },
+                                    {"masquerade": None},
+                                ],
+                            }
+                        }
+                    )
+                for comment in self.nft_foreign:
+                    items.append(
+                        {
+                            "rule": {
+                                "family": "inet",
+                                "table": table,
+                                "chain": "postrouting",
+                                "handle": 999,
+                                "comment": comment,
+                                "expr": [{"masquerade": None}],
+                            }
+                        }
+                    )
+                return 0, json.dumps({"nftables": items}), ""
+            case ["nft", "-f", path]:
+                text = Path(path).read_text()
+                rules = {}
+                for m in re.finditer(
+                    r'ip saddr (\S+) oifname "(\S+)" masquerade '
+                    r'comment "zboxapi vlan (\d+)"',
+                    text,
+                ):
+                    rules[int(m.group(3))] = m.group(1)
+                if "flush table inet" in text:
+                    self.nft_foreign = []  # flush empties our table, foreign rules too
+                self.nft_rules = rules
+                return 0, "", ""
             case ["ip", "-o", "-4", "addr", "show"]:
                 lines = [
                     f"{i}: {name}    inet {cidr} brd 0.0.0.0 scope global {name}"
@@ -178,6 +268,8 @@ def filer(tmp_path, monkeypatch):
         f"system_exports_file = {etc / 'exports'}\n"
         f"protected_exports = {root}/STORAGE01/NFS-01\n"
         f"folder_owner = {ME}\n"  # the API runs as root on zcore; the tests do not
+        "[masquerade]\n"
+        f"nft_file = {etc / 'nftables.d' / 'zboxapi-masquerade.nft'}\n"
     )
     monkeypatch.setattr(config, "CONFIG_FILE", etc / "zboxapi.conf")
     monkeypatch.setattr(system_mod, "AUDIT_LOG", tmp_path / "audit.log")
@@ -206,6 +298,7 @@ def host(filer, system, monkeypatch, tmp_path) -> FakeHost:
     fake.unit_dir = etc / "systemd" / "system"
     monkeypatch.setattr(subprocess, "run", fake.run)
     monkeypatch.setattr(storage, "lvm_available", lambda: fake.lvm_installed)
+    monkeypatch.setattr(vlan, "masquerade_available", lambda: system.nft_installed)
     return fake
 
 

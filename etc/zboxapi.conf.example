@@ -11,6 +11,15 @@ system_vlans_default = 10,20,30
 # System zPod VLANs that cannot be modified (comma-separated)
 system_vlans_zpod = 64,128,192
 
+# ── VLAN masquerade (nftables). Every key is optional. ──
+[masquerade]
+# Where translated traffic leaves zcore (the management interface)
+out_interface = eth0
+# The one nftables file zboxapi writes; load it at boot through /etc/nftables.conf
+nft_file = /etc/nftables.d/zboxapi-masquerade.nft
+# nftables table name (family inet); it belongs to zboxapi
+table = zboxapi
+
 # ── zcore only: disks, storages and NFS exports. Every key is optional. ──
 [storage]
 filer_root = /FILER

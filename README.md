@@ -5,7 +5,9 @@ zPodFactory zBox Api
 ## Features
 
 - **DNS Management**: Manage DNS records in `/etc/hosts` with automatic dnsmasq integration
-- **VLAN Management**: Manage VLAN interfaces with automatic network configuration
+- **VLAN Management**: Manage VLAN interfaces with automatic network configuration, with an
+  optional masquerade (source NAT to the management interface) for VLANs that must reach out
+  without being routed in
 - **NFS Exports** (zcore): Export folders under `/FILER/STORAGEnn` to clients, with
   `/etc/exports.d/zboxapi.exports` and `exportfs -ra`
 - **Disks and Storages** (zcore): Turn a new disk into a mounted `/FILER/STORAGEnn`, raw or LVM,

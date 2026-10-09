@@ -2,15 +2,21 @@ import configparser
 import contextlib
 import fcntl
 import ipaddress
+import json
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import AfterValidator, BaseModel, Field
 from pydantic_core import PydanticCustomError
+
+from zboxapi import config, guard, system
 
 # Paths managed by this API (module-level so tests can override)
 CONFIG_FILE = Path("/etc/zboxapi.conf")
@@ -220,6 +226,15 @@ CIDR = Annotated[str, AfterValidator(validate_cidr)]
 class VlanCreate(BaseModel):
     vlan: VLAN_ID = Field(..., description="VLAN ID (1-4094, excluding system VLANs)")
     gateway: CIDR = Field(..., description="Gateway IP address in CIDR notation")
+    masquerade: bool = Field(
+        False,
+        description="source-translate traffic from this VLAN that leaves on the "
+        "management interface (SNAT to its address); off by default",
+    )
+
+
+class VlanMasquerade(BaseModel):
+    enabled: bool
 
 
 class VlanUpdate(BaseModel):
@@ -230,8 +245,9 @@ class VlanView(BaseModel):
     vlan: int
     gateway: str
     interface: str
-    status: str
-    owner: str
+    status: Literal["up", "down"]
+    owner: Literal["user-defined", "system-default", "system-zpod"]
+    masquerade: bool = False  # always False for system VLANs
 
 
 @contextlib.contextmanager
@@ -306,7 +322,10 @@ def get_system_vlan_view(interface_name: str, vlan_id: int, owner: str) -> VlanV
 
 
 def get_user_vlan_view(
-    interface_name: str, vlan_id: int, config_file: Path
+    interface_name: str,
+    vlan_id: int,
+    config_file: Path,
+    masqueraded: set[int] | None = None,
 ) -> VlanView | None:
     """Build the view of a user-defined VLAN from its interfaces.d config file"""
     try:
@@ -326,6 +345,7 @@ def get_user_vlan_view(
         interface=interface_name_full,
         status=get_interface_status(interface_name_full),
         owner="user-defined",
+        masquerade=vlan_id in (masqueraded or set()),
     )
 
 
@@ -333,6 +353,7 @@ def get_existing_vlans() -> list[VlanView]:
     """Get all VLANs: system VLANs from config plus user VLANs from interfaces.d/"""
     interface_name = get_interface_name()
     config_dir = INTERFACES_DIR
+    masqueraded = masqueraded_vlans()  # one nft read per request, not one per VLAN
 
     system_vlans_default = get_system_vlans_default()
     system_vlans_zpod = get_system_vlans_zpod()
@@ -361,7 +382,9 @@ def get_existing_vlans() -> list[VlanView]:
             if vlan_id in system_vlans_default or vlan_id in system_vlans_zpod:
                 continue
 
-            if view := get_user_vlan_view(interface_name, vlan_id, config_file):
+            if view := get_user_vlan_view(
+                interface_name, vlan_id, config_file, masqueraded
+            ):
                 vlans.append(view)
 
     return sorted(vlans, key=lambda x: x.vlan)
@@ -469,6 +492,147 @@ def bring_interface_down(interface_name: str) -> None:
         ) from e
 
 
+# ── masquerade: one nftables rule per VLAN, in one file zboxapi owns ────────────────
+
+MASQ_HEADER = (
+    "# Managed by zboxapi (/vlan masquerade). Do not edit; "
+    "the file is rewritten on every change.\n"
+)
+MASQ_COMMENT_RE = re.compile(r"^zboxapi vlan (\d+)$")
+
+
+def masquerade_available() -> bool:
+    return shutil.which("nft") is not None
+
+
+def nft_file() -> Path:
+    return Path(config.get("masquerade", "nft_file"))
+
+
+def nft_table() -> str:
+    return config.get("masquerade", "table")
+
+
+def out_interface() -> str:
+    return config.get("masquerade", "out_interface")
+
+
+def masqueraded_vlans() -> set[int]:
+    """The VLAN ids with a rule in the live table. The live ruleset is the truth; the
+    file is only how it survives a reboot. No nft, or no table yet: an empty set."""
+    if not masquerade_available():
+        return set()
+    result = system.query(
+        ["nft", "-j", "list", "table", "inet", nft_table()], check=False
+    )
+    if result.returncode != 0:  # "No such file or directory": no table yet
+        return set()
+    try:
+        items = json.loads(result.stdout or "{}").get("nftables", [])
+    except ValueError:
+        return set()
+    found = set()
+    for item in items:
+        rule = item.get("rule") if isinstance(item, dict) else None
+        if rule and (m := MASQ_COMMENT_RE.match(str(rule.get("comment", "")))):
+            found.add(int(m.group(1)))
+    return found
+
+
+def user_vlan_gateways() -> dict[int, str]:
+    """VLAN id -> gateway for every user-defined VLAN (from its interfaces.d file)."""
+    return {
+        v.vlan: v.gateway for v in get_existing_vlans() if v.owner == "user-defined"
+    }
+
+
+def render_masquerade(vlans: set[int], gateways: dict[int, str]) -> str:
+    """The whole file for this set of VLANs. `add` + `flush` make loading it
+    idempotent and leave every other table alone; zero VLANs is the empty skeleton."""
+    table, oif = nft_table(), out_interface()
+    rules = []
+    for vlan_id in sorted(vlans):
+        if vlan_id not in gateways:
+            continue  # its interface file is gone: the rule goes with it
+        net = ipaddress.ip_network(gateways[vlan_id], strict=False)
+        rules.append(
+            f'        ip saddr {net} oifname "{oif}" masquerade '
+            f'comment "zboxapi vlan {vlan_id}"\n'
+        )
+    return (
+        MASQ_HEADER
+        + f"add table inet {table}\n"
+        + f"flush table inet {table}\n"
+        + f"table inet {table} {{\n"
+        + "    chain postrouting {\n"
+        + "        type nat hook postrouting priority srcnat; policy accept;\n"
+        + "".join(rules)
+        + "    }\n"
+        + "}\n"
+    )
+
+
+def write_nft_file(text: str) -> None:
+    path = nft_file()
+    guard.assert_path_writable(str(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        tmp = Path(handle.name)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def apply_masquerade_set(vlans: set[int], source: str = "vlan_masquerade") -> None:
+    """Render the file for `vlans`, write it, load it with nft -f. On a failed load
+    the previous file content is written back, so file and kernel never disagree."""
+    if not masquerade_available():
+        raise NetworkError("nftables is not installed on this host (nft not found)")
+    path = nft_file()
+    previous = path.read_text() if path.is_file() else None
+    write_nft_file(render_masquerade(vlans, user_vlan_gateways()))
+    result = system.run(["nft", "-f", str(path)], check=False, source=source)
+    if result.returncode != 0:
+        if previous is None:
+            path.unlink(missing_ok=True)
+        else:
+            write_nft_file(previous)
+        raise NetworkError(
+            f"nft -f {path} failed ({result.returncode}): "
+            f"{(result.stderr or result.stdout or '').strip()}"
+        )
+
+
+def set_masquerade(
+    vlan_id: int, enabled: bool, source: str = "vlan_masquerade"
+) -> bool:
+    """Make the VLAN masqueraded or not. Returns whether anything changed; when the
+    VLAN is already in the requested state nothing is written and nothing runs."""
+    with system.storage_lock():
+        current = masqueraded_vlans()
+        wanted = current | {vlan_id} if enabled else current - {vlan_id}
+        if wanted == current:
+            return False
+        if not enabled and not masquerade_available():
+            return False  # nothing can be masqueraded without nft
+        apply_masquerade_set(wanted, source)
+        return True
+
+
+def refresh_masquerade(vlan_id: int, source: str = "vlan_masquerade") -> bool:
+    """After a gateway change: re-render the rules if this VLAN has one."""
+    with system.storage_lock():
+        current = masqueraded_vlans()
+        if vlan_id not in current:
+            return False
+        apply_masquerade_set(current, source)
+        return True
+
+
 # API Router
 vlan_router = APIRouter(prefix="/vlan", tags=["vlan"])
 
@@ -520,15 +684,6 @@ def vlan_create(vlan_in: VlanCreate) -> VlanView:
         interface_name = get_interface_name()
         vlan_interface = f"{interface_name}.{vlan_in.vlan}"
         bring_interface_up(vlan_interface)
-
-        # Return the created VLAN
-        return VlanView(
-            vlan=vlan_in.vlan,
-            gateway=vlan_in.gateway,
-            interface=vlan_interface,
-            status="up",
-            owner="user-defined",
-        )
     except (ConfigError, NetworkError) as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
@@ -538,6 +693,27 @@ def vlan_create(vlan_in: VlanCreate) -> VlanView:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create VLAN: {str(e)}",
         ) from e
+
+    # The interface exists; masquerading is a second, separately reported step
+    if vlan_in.masquerade:
+        try:
+            set_masquerade(vlan_in.vlan, True)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"VLAN {vlan_in.vlan} created, but masquerading could not be "
+                f"enabled: {e}. Retry with PUT /vlan/{vlan_in.vlan}/masquerade",
+            ) from e
+
+    # Return the created VLAN, masquerade read back from the live table
+    return VlanView(
+        vlan=vlan_in.vlan,
+        gateway=vlan_in.gateway,
+        interface=vlan_interface,
+        status="up",
+        owner="user-defined",
+        masquerade=vlan_in.vlan in masqueraded_vlans(),
+    )
 
 
 @vlan_router.put("/{vlan_id}", response_model=VlanView)
@@ -555,15 +731,6 @@ def vlan_update(vlan_id: int, vlan_in: VlanUpdate) -> VlanView:
         vlan_interface = f"{interface_name}.{vlan_id}"
         bring_interface_down(vlan_interface)
         bring_interface_up(vlan_interface)
-
-        # Return the updated VLAN
-        return VlanView(
-            vlan=vlan_id,
-            gateway=vlan_in.gateway,
-            interface=vlan_interface,
-            status="up",
-            owner="user-defined",
-        )
     except PydanticCustomError as e:
         # System VLANs are forbidden from modification
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
@@ -577,6 +744,26 @@ def vlan_update(vlan_id: int, vlan_in: VlanUpdate) -> VlanView:
             detail=f"Failed to update VLAN {vlan_id}: {str(e)}",
         ) from e
 
+    # If the VLAN is masqueraded, its rule follows the new subnet
+    try:
+        refresh_masquerade(vlan_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"VLAN {vlan_id} updated to {vlan_in.gateway}, but its masquerade "
+            f"rule still names the old subnet: {e}. Repair with "
+            f'PUT /vlan/{vlan_id}/masquerade {{"enabled": true}}',
+        ) from e
+
+    return VlanView(
+        vlan=vlan_id,
+        gateway=vlan_in.gateway,
+        interface=vlan_interface,
+        status="up",
+        owner="user-defined",
+        masquerade=vlan_id in masqueraded_vlans(),
+    )
+
 
 @vlan_router.delete("/{vlan_id}")
 def vlan_delete(vlan_id: int) -> dict:
@@ -585,10 +772,18 @@ def vlan_delete(vlan_id: int) -> dict:
         # Validate VLAN ID
         validate_vlan_id(vlan_id)
 
+        # Its masquerade rule goes first, so no packet is translated for a subnet
+        # that is about to vanish; a failure here does not block the delete
+        note = ""
+        try:
+            set_masquerade(vlan_id, False)
+        except Exception as e:  # noqa: BLE001 - reported, not fatal
+            note = f" (masquerade rule could not be removed: {e})"
+
         # Delete VLAN configuration (brings the interface down first)
         delete_vlan_interface(vlan_id)
 
-        return {"message": f"VLAN {vlan_id} deleted successfully"}
+        return {"message": f"VLAN {vlan_id} deleted successfully{note}"}
     except PydanticCustomError as e:
         # System VLANs are forbidden from modification
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e)) from e
@@ -601,6 +796,40 @@ def vlan_delete(vlan_id: int) -> dict:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete VLAN {vlan_id}: {str(e)}",
         ) from e
+
+
+@vlan_router.put("/{vlan_id}/masquerade", response_model=VlanView)
+def vlan_masquerade(vlan_id: int, body: VlanMasquerade) -> VlanView:
+    """Masquerade a VLAN's traffic leaving on the management interface, or stop.
+    200 whether or not anything changed."""
+    try:
+        validate_vlan_id(vlan_id)
+    except PydanticCustomError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"VLAN {vlan_id} is a system VLAN and cannot be masqueraded",
+        ) from e
+    interface_name = get_interface_name()
+    if not (INTERFACES_DIR / f"{interface_name}.{vlan_id}.cfg").is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"VLAN {vlan_id} does not exist",
+        )
+    if body.enabled and not masquerade_available():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="nftables is not installed on this host (nft not found)",
+        )
+    try:
+        set_masquerade(vlan_id, body.enabled)
+    except (ConfigError, NetworkError) as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        ) from e
+    for vlan in get_existing_vlans():
+        if vlan.vlan == vlan_id:
+            return vlan
+    raise HTTPException(status.HTTP_404_NOT_FOUND, f"VLAN {vlan_id} not found")
 
 
 @vlan_router.put("/{vlan_id}/enable")

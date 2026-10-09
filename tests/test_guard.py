@@ -157,6 +157,11 @@ def test_run_allows_extend_only_commands_on_protected_devices(host, argv):
     guard.assert_argv_allowed(argv)  # does not raise
 
 
+def test_nft_commands_pass_the_guard(host):
+    guard.assert_argv_allowed(["nft", "-f", "/etc/nftables.d/zboxapi-masquerade.nft"])
+    assert system.is_read_only(["nft", "-j", "list", "table", "inet", "zboxapi"])
+
+
 def test_run_lets_read_only_commands_name_protected_devices(host):
     result = system.query(["lsblk", "-J", "-b", "/dev/sdb"])
     assert result.returncode == 0
@@ -215,6 +220,7 @@ def test_lvm_on_protected_disk_blocks_vg_lv_argv(host, filer):
         ("DELETE", "/nfs/STORAGE01/NFS-01", None),
         ("POST", "/disk/sdb/detach", None),
         ("POST", "/disk/sda/detach", None),
+        ("PUT", "/vlan/64/masquerade", {"enabled": True}),
     ],
 )
 def test_matrix_protected_targets_get_403_and_nothing_runs(
