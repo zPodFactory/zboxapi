@@ -164,6 +164,36 @@ Answers the `VlanView` with **200** whether or not anything changed, so it is sa
 exist, 400 when nftables is not installed and `enabled` is true, 500 with `nft`'s error when
 the load fails (the file is restored first).
 
+### 7. Enable a VLAN Interface
+**PUT** `/vlan/{vlan_id}/enable`
+
+Brings the interface up with `ip link set eth1.{vlan_id} up`. The configuration file is not
+touched, so this is how a VLAN disabled with the call below comes back without recreating it.
+
+**Response:**
+```json
+{
+    "message": "VLAN 2000 enabled successfully"
+}
+```
+
+### 8. Disable a VLAN Interface
+**PUT** `/vlan/{vlan_id}/disable`
+
+Brings the interface down with `ip link set eth1.{vlan_id} down`. The configuration file in
+`/etc/network/interfaces.d/` stays, so the VLAN comes back on the next boot or with `enable`.
+To remove it for good, use `DELETE /vlan/{vlan_id}`.
+
+**Response:**
+```json
+{
+    "message": "VLAN 2000 disabled successfully"
+}
+```
+
+Both calls answer **404** when the interface does not exist on the host (`ip link show` fails),
+**403** for a system VLAN, and **400** when `ip link set` fails, with its error in the message.
+
 ## Masquerade
 
 A user VLAN can be *masqueraded*: packets from its subnet that leave zcore on the management
