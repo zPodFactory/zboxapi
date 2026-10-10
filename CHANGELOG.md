@@ -20,6 +20,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-10
+
 ### Added
 - **Disks, storages and NFS exports on zcore**: three new routers for the filer VM.
   - `/disk` lists every block device with a live state (`system`, `protected`, `blank`,
