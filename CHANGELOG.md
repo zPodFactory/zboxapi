@@ -75,10 +75,10 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   enabling answers 400.
 - **Config sections `[storage]`, `[nfs]` and `[masquerade]`** in `/etc/zboxapi.conf`, every
   key optional; the existing file needs no change.
-- **What zcore needs**: `lvm2` for `lvm: true` (400 until installed, raw works), and for
-  masquerade rules to survive a reboot an `/etc/nftables.conf` that includes
-  `/etc/nftables.d/*.nft` with `nftables.service` enabled. Both are packer-zcore changes;
-  everything else is in the appliance already.
+- **What zcore needs**: `lvm2` for `lvm: true`, and for masquerade rules to survive a reboot
+  an `/etc/nftables.conf` that includes `/etc/nftables.d/*.nft` with `nftables.service`
+  enabled. **zCore 13.7 ships both.** On an older zcore `lvm: true` answers 400 (raw works)
+  and masquerade rules last until the next reboot; everything else is in every appliance.
 
 ### Changed
 - **VLAN overlap check covers the whole host.** A new or updated VLAN gateway may not overlap

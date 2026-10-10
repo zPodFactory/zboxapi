@@ -222,7 +222,8 @@ blank again.
 
 Refused with 403 for a protected or system disk, 404 for an unknown disk, 409 for a disk that
 is not blank, a name already in use or a non-empty mount point, 400 for `lvm: true` when the
-`lvm2` package is not installed (raw still works).
+`lvm2` package is not installed, which is the case on zcore builds before 13.7 (raw still
+works).
 
 ### 4. Adopt an existing filesystem
 **POST** `/storage/adopt`
@@ -321,7 +322,7 @@ NFS-01 is refused with 403.
 
 ## What zcore needs
 
-All in the appliance already, except `lvm2`, which packer-zcore now installs:
+zCore 13.7 and later ship all of them, `lvm2` included:
 
 | Tool | Package |
 |---|---|
@@ -332,7 +333,7 @@ All in the appliance already, except `lvm2`, which packer-zcore now installs:
 | pvcreate, vgcreate, lvcreate, pvresize, lvextend | lvm2 |
 | exportfs | nfs-kernel-server |
 
-Without `lvm2`, `lvm: true` answers 400 and raw storages work.
+On a zcore older than 13.7 there is no `lvm2`: `lvm: true` answers 400 and raw storages work.
 
 ## Files
 
