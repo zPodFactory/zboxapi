@@ -42,6 +42,7 @@ class FakeSystem:
 
     def __init__(self):
         self.calls: list[list[str]] = []
+        self.mutating_calls: list[list[str]] = []  # commands that changed the model
         self.links: dict[str, str] = {}  # interface -> "up" | "down"
         self.addresses: dict[str, str] = {}  # interface -> CIDR
         self.fail: set[tuple[str, ...]] = set()  # command prefixes that fail
@@ -166,6 +167,17 @@ class FakeSystem:
                         }
                     )
                 return 0, json.dumps({"nftables": items}), ""
+            case ["nft", "list", "table", "inet", table]:
+                if self.nft_rules is None:
+                    return 1, "", "Error: No such file or directory"
+                return 0, f"table inet {table} {{\n}}\n", ""
+            case ["nft", "delete", "table", "inet", table]:
+                self.mutating_calls.append(cmd)
+                if self.nft_rules is None:
+                    return 1, "", "Error: No such file or directory"
+                self.nft_rules = None
+                self.nft_foreign = []
+                return 0, "", ""
             case ["nft", "-f", path]:
                 text = Path(path).read_text()
                 rules = {}

@@ -70,7 +70,9 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   management interface, so a VLAN scoped to the zPod can reach out without being routed from
   outside. Off by default; system VLANs refused; `masquerade` in every VLAN response is read
   from the live table. The rule follows a gateway change and goes before the interface on
-  delete. Without `nft`, reads work and enabling answers 400.
+  delete; when the last rule goes, the table and the file go with it, so a host with nothing
+  masqueraded has no NAT hook and no connection tracking. Without `nft`, reads work and
+  enabling answers 400.
 - **Config sections `[storage]`, `[nfs]` and `[masquerade]`** in `/etc/zboxapi.conf`, every
   key optional; the existing file needs no change.
 - **What zcore needs**: `lvm2` for `lvm: true` (400 until installed, raw works), and for

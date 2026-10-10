@@ -614,7 +614,9 @@ def test_masquerade_toggle_is_idempotent(client, host, system, tmp_path):
     )
 
 
-def test_masquerade_disable_leaves_the_skeleton(client, host, system, tmp_path):
+def test_masquerade_disable_removes_file_and_table(client, host, system, tmp_path):
+    """No masqueraded VLAN means no file and no table: the host is back to the state
+    of a zcore that never masqueraded anything (no NAT hook, no conntrack)."""
     assert (
         client.post(
             "/vlan",
@@ -622,11 +624,70 @@ def test_masquerade_disable_leaves_the_skeleton(client, host, system, tmp_path):
         ).status_code
         == 200
     )
+    assert nft_file(tmp_path).exists() and system.nft_rules == {1000: "10.10.100.0/24"}
     r = client.put("/vlan/1000/masquerade", json={"enabled": False})
     assert r.status_code == 200 and r.json()["masquerade"] is False
-    assert nft_file(tmp_path).read_text() == MASQ_SKELETON + "    }\n}\n"
-    assert system.nft_rules == {}
-    assert len(nft_loads(system)) == 2
+    assert not nft_file(tmp_path).exists()
+    assert system.nft_rules is None  # the table is gone
+    assert ["nft", "delete", "table", "inet", "zboxapi"] in system.mutating_calls
+    assert len(nft_loads(system)) == 1  # the enable; the disable loads nothing
+    # disabling again, or deleting the VLAN, converges on the same state without nft
+    n = len(system.mutating_calls)
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": False}).status_code == 200
+    )
+    assert client.delete("/vlan/1000").status_code == 200
+    assert [c for c in system.mutating_calls[n:] if c[0] == "nft"] == []
+
+
+def test_masquerade_is_idempotent_from_any_state(client, host, system, tmp_path):
+    """Whatever the file and the kernel hold, one call makes both match the request."""
+    assert (
+        client.post(
+            "/vlan", json={"vlan": 1000, "gateway": "10.10.100.1/24"}
+        ).status_code
+        == 200
+    )
+    # stale file, no table (e.g. the file was left by hand): enabling converges both
+    nft_file(tmp_path).parent.mkdir(parents=True, exist_ok=True)
+    nft_file(tmp_path).write_text("garbage\n")
+    system.nft_rules = None
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": True}).json()["masquerade"]
+        is True
+    )
+    assert system.nft_rules == {1000: "10.10.100.0/24"}
+    assert "zboxapi vlan 1000" in nft_file(tmp_path).read_text()
+    # table with a foreign rule and no file: disabling deletes the table, no file left
+    nft_file(tmp_path).unlink()
+    system.nft_foreign = ["someone else"]
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": False}).json()[
+            "masquerade"
+        ]
+        is False
+    )
+    assert system.nft_rules is None and not nft_file(tmp_path).exists()
+    # table present but empty (e.g. left by an older version): any change converges
+    system.nft_rules = {}
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": False}).json()[
+            "masquerade"
+        ]
+        is False
+    )
+    assert system.nft_rules == {}  # nothing to do: no rules were requested or present
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": True}).json()["masquerade"]
+        is True
+    )
+    assert (
+        client.put("/vlan/1000/masquerade", json={"enabled": False}).json()[
+            "masquerade"
+        ]
+        is False
+    )
+    assert system.nft_rules is None
 
 
 def test_two_masqueraded_vlans_are_ordered_by_id(client, host, system, tmp_path):
@@ -704,13 +765,13 @@ def test_delete_removes_the_rule_before_ifdown(client, host, system, tmp_path):
     assert r.status_code == 200, r.text
     assert r.json() == {"message": "VLAN 1000 deleted successfully"}
     kinds = [
-        "nft -f" if c[:2] == ["nft", "-f"] else c[0]
+        "nft delete" if c[:2] == ["nft", "delete"] else c[0]
         for c in system.calls
-        if c[:2] == ["nft", "-f"] or c[0] == "ifdown"
+        if c[:2] == ["nft", "delete"] or c[0] == "ifdown"
     ]
-    assert kinds == ["nft -f", "ifdown"]  # the rule goes before the interface
-    assert "zboxapi vlan 1000" not in nft_file(tmp_path).read_text()
-    assert system.nft_rules == {}
+    assert kinds == ["nft delete", "ifdown"]  # the rule goes before the interface
+    assert not nft_file(tmp_path).exists()
+    assert system.nft_rules is None
 
 
 @pytest.mark.parametrize("vlan_id", [10, 64, 192])
@@ -789,8 +850,8 @@ def test_failed_nft_load_restores_the_file(client, host, system, tmp_path):
     # and a first-ever failure leaves no file behind
     system.fail.clear()
     client.put("/vlan/1000/masquerade", json={"enabled": False})
-    nft_file(tmp_path).unlink()
-    system.nft_rules = None
+    assert not nft_file(tmp_path).exists()  # the last rule went, so did the file
+    assert system.nft_rules is None
     system.fail.add(("nft", "-f"))
     assert (
         client.put("/vlan/2000/masquerade", json={"enabled": True}).status_code == 500

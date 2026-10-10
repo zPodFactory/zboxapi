@@ -202,9 +202,12 @@ table inet zboxapi {
 ```
 
 The network is the VLAN's gateway normalised (`10.10.100.1/24` → `10.10.100.0/24`); the rule
-stores no address of `eth0`, so it follows whatever address the interface has. With zero
-masqueraded VLANs the file still holds the table and chain: that is what "nothing masqueraded"
-looks like. Every `nft -f` run is in the audit log (`GET /audit`, source `vlan_masquerade`).
+stores no address of `eth0`, so it follows whatever address the interface has. When the last
+masqueraded VLAN is switched off or deleted, the API deletes the table and removes the file:
+"nothing masqueraded" is no file, no table, no NAT hook and no connection tracking, the state
+of a zcore that never masqueraded anything. Every call converges file and kernel on the
+requested set whatever they held before, and a call that changes nothing runs nothing. Every
+`nft` run is in the audit log (`GET /audit`, source `vlan_masquerade`).
 
 ### Example
 

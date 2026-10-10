@@ -548,7 +548,7 @@ def user_vlan_gateways() -> dict[int, str]:
 
 def render_masquerade(vlans: set[int], gateways: dict[int, str]) -> str:
     """The whole file for this set of VLANs. `add` + `flush` make loading it
-    idempotent and leave every other table alone; zero VLANs is the empty skeleton."""
+    idempotent and leave every other table alone."""
     table, oif = nft_table(), out_interface()
     rules = []
     for vlan_id in sorted(vlans):
@@ -569,7 +569,7 @@ def render_masquerade(vlans: set[int], gateways: dict[int, str]) -> str:
         + "".join(rules)
         + "    }\n"
         + "}\n"
-    )
+    )  # never written with zero rules: that state is "no file, no table"
 
 
 def write_nft_file(text: str) -> None:
@@ -587,14 +587,36 @@ def write_nft_file(text: str) -> None:
     os.replace(tmp, path)
 
 
+def masquerade_table_exists() -> bool:
+    result = system.query(["nft", "list", "table", "inet", nft_table()], check=False)
+    return result.returncode == 0
+
+
 def apply_masquerade_set(vlans: set[int], source: str = "vlan_masquerade") -> None:
-    """Render the file for `vlans`, write it, load it with nft -f. On a failed load
-    the previous file content is written back, so file and kernel never disagree."""
+    """Converge file and kernel on `vlans`. With at least one rule: render the file,
+    write it, load it with nft -f, and on a failed load write the previous content back.
+    With none: delete the table and remove the file, so a host with nothing masqueraded
+    has no table, no NAT hook and no connection tracking, exactly like a fresh zcore."""
     if not masquerade_available():
         raise NetworkError("nftables is not installed on this host (nft not found)")
     path = nft_file()
+    gateways = user_vlan_gateways()
+    if not {v for v in vlans if v in gateways}:
+        if masquerade_table_exists():
+            result = system.run(
+                ["nft", "delete", "table", "inet", nft_table()],
+                check=False,
+                source=source,
+            )
+            if result.returncode != 0:
+                raise NetworkError(
+                    f"nft delete table inet {nft_table()} failed "
+                    f"({result.returncode}): {(result.stderr or '').strip()}"
+                )
+        path.unlink(missing_ok=True)
+        return
     previous = path.read_text() if path.is_file() else None
-    write_nft_file(render_masquerade(vlans, user_vlan_gateways()))
+    write_nft_file(render_masquerade(vlans, gateways))
     result = system.run(["nft", "-f", str(path)], check=False, source=source)
     if result.returncode != 0:
         if previous is None:
