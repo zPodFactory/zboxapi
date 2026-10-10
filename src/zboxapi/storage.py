@@ -88,9 +88,16 @@ def usage(mountpoint: str) -> tuple[int, int, int]:
     return size, used, avail
 
 
+FILESYSTEM_DIRS = frozenset({"lost+found"})  # ext4's own, not a folder of ours
+
+
 def folders_in(mountpoint: str) -> list[Path]:
     try:
-        return sorted(p for p in Path(mountpoint).iterdir() if p.is_dir())
+        return sorted(
+            p
+            for p in Path(mountpoint).iterdir()
+            if p.is_dir() and p.name not in FILESYSTEM_DIRS
+        )
     except OSError:
         return []
 
@@ -770,6 +777,10 @@ MODE_RE = re.compile(r"^[0-7]{3,4}$")
 
 
 def validate_folder_name(value: str) -> str:
+    if value in FILESYSTEM_DIRS:
+        raise PydanticCustomError(
+            "value_error", f"'{value}' belongs to the filesystem, not to the API"
+        )
     if value.lower() in RESERVED_FOLDER_NAMES:
         raise PydanticCustomError(
             "value_error", f"'{value}' is a reserved name under /storage/{{name}}"

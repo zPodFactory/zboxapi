@@ -783,3 +783,18 @@ def test_auto_name_skips_mounted_storages_and_can_be_forced(client, host, filer)
         client.post("/storage", json={"disk": "sde", "name": "STORAGE07"}).status_code
         == 409
     )
+
+
+def test_lost_and_found_is_neither_listed_nor_manageable(client, host, filer):
+    (filer / "STORAGE01" / "lost+found").mkdir()
+    names_listed = [
+        f["name"] for f in client.get("/storage/STORAGE01").json()["folders"]
+    ]
+    assert "lost+found" not in names_listed and "NFS-02" in names_listed
+    for method in ("POST", "PUT", "DELETE"):
+        r = client.request(
+            method, "/storage/STORAGE01/lost+found", json={"mode": "0700"}
+        )
+        assert r.status_code == 422, (method, r.text)
+        assert "belongs to the filesystem" in r.text
+    assert (filer / "STORAGE01" / "lost+found").is_dir()
