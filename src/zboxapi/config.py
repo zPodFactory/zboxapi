@@ -16,7 +16,7 @@ DEFAULTS: dict[str, dict[str, str]] = {
         "protected_storages": "STORAGE01",
         "mount_unit_dir": "/etc/systemd/system",
         "filesystem": "ext4",
-        "mkfs_options": "-m 0 -E lazy_itable_init=0,lazy_journal_init=0",
+        "mkfs_options": "-m 0",
         "mount_options": "defaults,noatime,nofail",
     },
     "masquerade": {

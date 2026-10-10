@@ -27,7 +27,9 @@ filer_root = /FILER
 protected_storages = STORAGE01
 mount_unit_dir = /etc/systemd/system
 filesystem = ext4
-mkfs_options = -m 0 -E lazy_itable_init=0,lazy_journal_init=0
+# No reserved blocks for root on a data volume. ext4's inode tables are zeroed lazily
+# in the background after the first mount (the Debian default), so mkfs takes seconds.
+mkfs_options = -m 0
 mount_options = defaults,noatime,nofail
 
 [nfs]

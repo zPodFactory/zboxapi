@@ -43,7 +43,7 @@ filer_root = /FILER
 protected_storages = STORAGE01          # comma-separated; STORAGE01 is always included
 mount_unit_dir = /etc/systemd/system
 filesystem = ext4
-mkfs_options = -m 0 -E lazy_itable_init=0,lazy_journal_init=0
+mkfs_options = -m 0
 mount_options = defaults,noatime,nofail
 ```
 

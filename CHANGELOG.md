@@ -29,8 +29,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   - `/storage` lists the filesystems mounted at `/FILER/STORAGEnn` with layout, sizes in
     bytes (`size_bytes`, `used_bytes`, `available_bytes`) and top-level folders.
     `POST /storage` turns a blank disk into a mounted storage: GPT with one partition via
-    sfdisk, optional one-VG-per-disk LVM, ext4, a systemd mount unit per storage ordered
-    before nfs-server; `name` is optional and defaults to the next free number.
+    sfdisk, optional one-VG-per-disk LVM, ext4 (`-m 0`, lazy inode initialisation so
+    mkfs takes seconds), a systemd mount unit per storage ordered before nfs-server; `name` is optional and defaults to the next free number.
     `POST /storage/adopt` mounts an existing ext4 the same way without formatting.
     `POST /storage/{name}/grow` extends partition, PV, LV and filesystem online after a
     vSphere resize and is a no-op when nothing grew. `DELETE /storage/{name}` unmounts a
