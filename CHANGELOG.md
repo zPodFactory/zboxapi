@@ -21,27 +21,49 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 ## [Unreleased]
 
 ### Added
-- **Storage and NFS inventory (read-only, phase 1 of the NFS feature).** `GET /disk` lists
-  every block device with a state (`system`, `protected`, `blank`, `foreign`, `in-use`),
-  `GET /storage` lists the filesystems mounted at `/FILER/STORAGEnn` with layout, sizes and
-  folder listing, and `GET /nfs` merges `/etc/exports` (owner `system`) with
-  `/etc/exports.d/zboxapi.exports` (owner `user-defined`) and the live `exportfs -v`.
-  Nothing mutates yet.
-- **Guard rail for NFS-01.** `guard.py` computes a protected set on every request from the
-  live mount of STORAGE01 down to its disk, every partition and any LVM on it, plus the
-  NFS-01 export path; STORAGE01 and NFS-01 are a floor the config cannot remove. It is
-  enforced at the endpoints, inside the single command runner in `system.py` (which refuses
-  any mutating argv naming a protected member and audits every command to
-  `/var/log/zboxapi-storage.log`), and in the file writers.
-- **Config sections `[storage]` and `[nfs]`** in `/etc/zboxapi.conf`, every key optional. The
-  default export options are `rw,no_subtree_check,no_root_squash`, what zcore-init gives NFS-VCD.
-- **Folders (phase 2).** `GET /storage/{name}` lists the top-level folders with their
-  owner, mode, exported and protected flags. `POST /storage/{name}/{folder}` creates one
-  with an owner (`user:group`) and an octal mode, defaulting to the config values;
-  `PUT /storage/{name}/{folder}` applies chown and/or chmod, recursively on request;
-  `DELETE` removes a folder when it is empty and not exported, or with everything in it
-  when `?force=true` is passed; an exported folder and NFS-01 are refused either way. NFS-01
-  answers 403 to all three; other folders on STORAGE01 are manageable, as decided.
+- **Disks, storages and NFS exports on zcore**: three new routers for the filer VM.
+  - `/disk` lists every block device with a live state (`system`, `protected`, `blank`,
+    `foreign`, `in-use`); `POST /disk/rescan` detects disks attached since boot and size
+    changes; `POST /disk/{name}/detach` makes the kernel forget a disk nothing is mounted
+    from, so it can be removed from the VM cleanly.
+  - `/storage` lists the filesystems mounted at `/FILER/STORAGEnn` with layout, sizes in
+    bytes (`size_bytes`, `used_bytes`, `available_bytes`) and top-level folders.
+    `POST /storage` turns a blank disk into a mounted storage: GPT with one partition via
+    sfdisk, optional one-VG-per-disk LVM, ext4, a systemd mount unit per storage ordered
+    before nfs-server; `name` is optional and defaults to the next free number.
+    `POST /storage/adopt` mounts an existing ext4 the same way without formatting.
+    `POST /storage/{name}/grow` extends partition, PV, LV and filesystem online after a
+    vSphere resize and is a no-op when nothing grew. `DELETE /storage/{name}` unmounts a
+    storage that has no exports and leaves the filesystem and disk intact. A disk with
+    anything on it is never formatted; there is no force flag for that.
+  - Folders: `POST /storage/{name}/{folder}` creates one with an owner (`user:group`) and
+    an octal mode, defaulting to the config; `PUT` applies chown and/or chmod, recursively
+    on request; `DELETE` removes it when empty, or with everything in it when
+    `?force=true` is passed; an exported folder is refused either way until its export is
+    removed.
+  - `/nfs` manages exports as a path, a list of clients (IPv4 address, IPv4 CIDR or `*`)
+    and one options string per export, validated against an allowlist and defaulting to
+    `rw,no_subtree_check,no_root_squash`. `POST /nfs` creates the folder when missing;
+    `PUT /nfs/{storage}/{folder}` creates (201) or replaces (200) and is safe to repeat;
+    `POST .../client` and `DELETE .../client/{client}` add and remove one client, the last
+    removal removing the export; `DELETE /nfs/{storage}/{folder}` stops exporting and
+    always keeps the folder and its data. Only `/etc/exports.d/zboxapi.exports` is written,
+    replaced atomically, then `exportfs -ra`; the lines of `/etc/exports` are listed as
+    owner `system` and never modified. `GET /nfs/status` reports the nfs-server state,
+    versions, threads, exports served versus in the files, and the connected clients.
+- **Guard rail.** NFS-01, `/FILER/STORAGE01` and the whole disk behind it are never
+  modified, nor is the system disk; the one exception is growing, which only adds space.
+  The protected set is computed on every request from the live mount, with STORAGE01 and
+  NFS-01 as a floor the config cannot remove, and enforced three times: every mutating
+  endpoint answers 403, the single command runner in `system.py` refuses any command
+  naming a protected device except the exact grow shapes and audits every command to
+  `/var/log/zboxapi-storage.log`, and the file writers refuse a protected path. Other
+  folders and exports on STORAGE01 are ordinary.
+- **Operations as steps.** Create, adopt, grow and delete answer with the storage `name`
+  and named steps (`step`, `target`, `detail`, `status`, `exit_code`). `?dry_run=true`
+  returns the plan with nothing run, `?verbose=true` adds each command and its output. A
+  failed step rolls back what was done, in reverse, and the 500 lists both.
+- **`GET /audit`**: the storage and nfs audit log, newest first, over the API.
 - **Masquerade option on VLAN interfaces.** `POST /vlan` takes `masquerade: true` and
   `PUT /vlan/{id}/masquerade` toggles it: one nftables rule per VLAN in
   `/etc/nftables.d/zboxapi-masquerade.nft`, source-translating traffic that leaves on the
@@ -49,69 +71,12 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   outside. Off by default; system VLANs refused; `masquerade` in every VLAN response is read
   from the live table. The rule follows a gateway change and goes before the interface on
   delete. Without `nft`, reads work and enabling answers 400.
-- **Sizes are bytes, named as such.** `size_bytes`, `used_bytes`, `available_bytes` on
-  storages, `size_bytes` on disks and partitions, `before_bytes`/`after_bytes` on a rescan,
-  `*_bytes` keys in a grow's before/after. No human-readable size fields: formatting belongs
-  to the consumer.
-- **Per-export options.** `POST /nfs` and `PUT /nfs/{storage}/{folder}` take an optional
-  `options` string (`ro,no_subtree_check` for a read-only ISO library, `rw,...,root_squash`
-  for a squashed share), validated against an allowlist with conflicting pairs refused. It
-  applies to every client of the export, a client added later inherits it, and PUT without
-  it keeps the current one. Omitted on create, the configured `export_options` applies as
-  before. The export view carries `options` next to the per-client echo.
-- **Operation responses carry `name`**, the storage they target, so a dry run states the
-  number the API picked when `name` was omitted.
-- **Every step carries `exit_code`** in the operation responses, verbose or not: the
-  command's exit status once it ran, `null` in a dry run, so both have the same shape.
-- **`GET /nfs/status`**: nfs-server state, NFS versions served, nfsd threads, exports served
-  versus in the files, the inactive ones, and the connected clients (NFSv3 from the rmtab,
-  NFSv4 from nfsd).
-- **`PUT /nfs/{storage}/{folder}` creates what is missing** (201) and replaces the clients
-  otherwise (200), so an orchestrator can repeat it safely.
-- **`POST /disk/{name}/detach`** tells the kernel to forget a disk nothing is mounted from, so
-  the virtual disk can be removed from the VM cleanly. Protected and system disks: 403.
-- **`GET /audit`**: the storage and nfs audit log, newest first, over the API.
-- **NFS exports (phase 2).** `POST /nfs` exports `/FILER/STORAGEnn/FOLDER` to a list of
-  clients (IPv4 address, IPv4 CIDR or `*`), creating the folder with the configured owner and
-  mode when it is missing; `PUT /nfs/{storage}/{folder}` replaces the client list;
-  `POST .../client` and `DELETE .../client/{client}` add and remove one client, and removing
-  the last client removes the export; `DELETE /nfs/{storage}/{folder}` stops exporting and
-  always keeps the folder and its data. The API writes only `/etc/exports.d/zboxapi.exports`,
-  replaced atomically, and runs `exportfs -ra`. Exports in `/etc/exports` (owner `system`)
-  and NFS-01 answer 403 to every change.
-- **Disks and storages (phase 3).** `POST /disk/rescan` detects new disks and size changes,
-  never touching the protected or system disks. `POST /storage` turns a blank disk into a
-  mounted `/FILER/STORAGEnn` (GPT with one partition via sfdisk, optional one-VG-per-disk LVM,
-  ext4, a systemd mount unit per storage); `POST /storage/adopt` mounts an existing ext4 the
-  same way without formatting; `POST /storage/{name}/grow` extends partition, PV, LV and
-  filesystem online after a vSphere resize, and is a no-op when nothing grew;
-  `DELETE /storage/{name}` unmounts a storage that has no exports and leaves the filesystem
-  and disk intact. Every one of them takes `?dry_run=true` (the plan, nothing runs) and
-  `?verbose=true` (the exact command and output per step). Responses describe steps in
-  storage terms (`step`, `target`, `detail`, `status`); a failed create is rolled back to a
-  blank disk and the response lists what was undone. `lvm: true` answers 400 until lvm2 is
-  installed.
-- **Growing is allowed on protected storages.** `POST /storage/STORAGE01/grow` works: rescan,
-  growpart, pvresize, lvextend and resize2fs only add space and move no data, so the command
-  runner lets exactly those command shapes through on a protected device and nothing else
-  (a `resize2fs` with a size, or `lvreduce`, stays refused). A failing step answers
-  `Cannot grow NAME: …` and changes nothing. `POST /disk/rescan` reads the size of every
-  disk, protected and system ones included; the response no longer has a `skipped` list.
-- **The system disk is protected too.** Whatever holds `/`, `/boot` or swap joins the
-  protected set as devices (its partitions and LVM included), so the command runner
-  refuses it like the STORAGE01 disk. Growing it remains `zbox-init --extend-disk`'s job.
-
-## [0.1.1] — 2026-10-04
-
-### Fixed
-- **Mount units start before nfs-server.** A storage's unit is now wanted by
-  `local-fs.target` (like an fstab entry) and ordered `Before=nfs-server.service`; with
-  `multi-user.target` alone it could start after nfs-server, whose `exportfs` then skipped
-  the still-missing paths and the exports were absent until the next `exportfs -ra`.
-- **PyPI project page links.** The README now uses absolute GitHub URLs, so the links to
-  `DOC_DNS.md`, `DOC_VLAN.md`, the changelog and the release guide work on pypi.org instead
-  of resolving to pages under the PyPI project; `[project.urls]` adds Homepage, Repository,
-  Changelog, Documentation and Issues to the PyPI sidebar.
+- **Config sections `[storage]`, `[nfs]` and `[masquerade]`** in `/etc/zboxapi.conf`, every
+  key optional; the existing file needs no change.
+- **What zcore needs**: `lvm2` for `lvm: true` (400 until installed, raw works), and for
+  masquerade rules to survive a reboot an `/etc/nftables.conf` that includes
+  `/etc/nftables.d/*.nft` with `nftables.service` enabled. Both are packer-zcore changes;
+  everything else is in the appliance already.
 
 ### Changed
 - **VLAN overlap check covers the whole host.** A new or updated VLAN gateway may not overlap
@@ -119,6 +84,16 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
   `eth1` itself and `eth0` included (`10.10.20.64/28` inside `eth1.1000`'s `10.10.20.0/24`,
   or a VLAN inside `eth1`'s own subnet, both answer 400). The message names the conflicting
   VLAN or interface and its address instead of two normalised networks.
+
+## [0.1.1] — 2026-10-04
+
+### Fixed
+- **PyPI project page links.** The README now uses absolute GitHub URLs, so the links to
+  `DOC_DNS.md`, `DOC_VLAN.md`, the changelog and the release guide work on pypi.org instead
+  of resolving to pages under the PyPI project; `[project.urls]` adds Homepage, Repository,
+  Changelog, Documentation and Issues to the PyPI sidebar.
+
+### Changed
 - **Python 3.14 only.** `requires-python` is `>=3.14`; older interpreters are no longer
   supported or tested, since every zbox install is controlled. Install with
   `uv tool install zboxapi`, which fetches a managed 3.14 where the system Python is older.
