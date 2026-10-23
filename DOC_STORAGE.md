@@ -102,11 +102,12 @@ from the hypervisor, then answers with the inventory as it stands. Nothing on an
   hot-added disk by itself, before any rescan, so `new` is usually empty: it is a safety net,
   not the way to find a disk.
 - `resized`: the disks whose size changed. A disk grown in vSphere keeps its old size in the
-  guest until this re-read, so call it after every grow, before `POST /storage/{name}/grow`.
+  guest, and in `GET /disk`, until it is re-read: by this call, or by `POST /storage/{name}/grow`,
+  whose first step re-reads its own disk.
 - `disks`: every disk, exactly as `GET /disk` lists them. Find the disk you added by its
   `serial`, which is the vSphere disk UUID (`VirtualDisk.backing.uuid` without dashes,
-  lowercase) when the VM has `disk.EnableUUID = TRUE`, as zcore 13.7 and later do. The name
-  (`sdc`) is not a stable handle: it shifts after a reboot when a disk before it was removed.
+  lowercase) when the VM has `disk.EnableUUID = TRUE`. The name (`sdc`) is not a stable
+  handle: it shifts after a reboot when a disk before it was removed.
 
 ```json
 {

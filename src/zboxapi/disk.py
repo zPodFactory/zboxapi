@@ -148,8 +148,8 @@ class ResizedDisk(BaseModel):
 
 class RescanResult(BaseModel):
     new: list[str] = Field(
-        description="disks this call's SCSI host scan attached; empty when the "
-        "hypervisor already hot-plugged them (PVSCSI does), so find a disk in `disks` "
+        description="disks this call's SCSI host scan attached; empty when the guest "
+        "kernel attached them on hot-add (PVSCSI does), so find a disk in `disks` "
         "by its serial"
     )
     resized: list[ResizedDisk] = Field(
