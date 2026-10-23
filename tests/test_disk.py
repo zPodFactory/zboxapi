@@ -72,7 +72,7 @@ def test_rescan_finds_new_disks_and_size_changes(client, host):
     host.hotplug(Disk(name="sdc", size=500 * G, serial="6000c29sdc"))
     r = client.post("/disk/rescan")
     assert r.status_code == 200, r.text
-    assert r.json() == {"new": ["sdc"], "resized": []}
+    assert r.json()["new"] == ["sdc"] and r.json()["resized"] == []
     assert client.get("/disk/sdc").json()["state"] == "blank"
 
     host.resize("sdc", T)
@@ -81,7 +81,25 @@ def test_rescan_finds_new_disks_and_size_changes(client, host):
     assert r.json()["resized"] == [
         {"disk": "sdc", "before_bytes": 500 * G, "after_bytes": T, "storage": None}
     ]
-    assert client.post("/disk/rescan").json() == {"new": [], "resized": []}
+    r = client.post("/disk/rescan").json()
+    assert r["new"] == [] and r["resized"] == []
+
+
+def test_rescan_lists_every_disk_so_a_hot_plugged_one_is_found_by_serial(client, host):
+    # PVSCSI hot-add: the guest kernel attaches the disk before any rescan, so `new`
+    # stays empty; the caller finds its disk in `disks` by the serial vSphere gave it.
+    serial = "6000c29d785c0aa83952b4c9fe7b8d43"
+    host.add_disk("sdc", 500 * G, serial=serial)
+    r = client.post("/disk/rescan")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["new"] == [] and body["resized"] == []
+    assert body["disks"] == client.get("/disk").json()
+    match = [d for d in body["disks"] if d["serial"] == serial]
+    assert [(d["name"], d["state"], d["size_bytes"]) for d in match] == [
+        ("sdc", "blank", 500 * G)
+    ]
+    assert host.mutating_calls == []
 
 
 def test_rescan_reads_new_sizes_of_every_disk_without_modifying_any(

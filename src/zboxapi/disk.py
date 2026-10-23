@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from zboxapi import guard, system
 
@@ -147,8 +147,17 @@ class ResizedDisk(BaseModel):
 
 
 class RescanResult(BaseModel):
-    new: list[str]
-    resized: list[ResizedDisk]
+    new: list[str] = Field(
+        description="disks this call's SCSI host scan attached; empty when the "
+        "hypervisor already hot-plugged them (PVSCSI does), so find a disk in `disks` "
+        "by its serial"
+    )
+    resized: list[ResizedDisk] = Field(
+        description="disks whose size changed when this call re-read it"
+    )
+    disks: list[DiskView] = Field(
+        description="every disk after the rescan, as GET /disk lists them"
+    )
 
 
 def find_disk(name: str, nodes: list[system.BlockNode]) -> system.BlockNode | None:
@@ -159,7 +168,8 @@ def find_disk(name: str, nodes: list[system.BlockNode]) -> system.BlockNode | No
 
 
 def rescan() -> RescanResult:
-    """SCSI host scan for new disks, then a size rescan of every disk."""
+    """SCSI host scan for new disks, then a size rescan of every disk, then the
+    inventory as it stands, so a caller finds its disk by serial in one call."""
     before = {d.name: d for d in system.block_devices() if d.type == "disk"}
 
     for host_scan in sorted(system.SYS_SCSI_HOST.glob("host*/scan")):
@@ -172,7 +182,9 @@ def rescan() -> RescanResult:
         if node.exists():
             system.write_sysfs(node, "1\n", source="disk_rescan")
 
-    after = {d.name: d for d in system.block_devices() if d.type == "disk"}
+    nodes = system.block_devices()
+    after = {d.name: d for d in nodes if d.type == "disk"}
+    ps = guard.protected_set(nodes)
     return RescanResult(
         new=sorted(set(after) - set(before)),
         resized=[
@@ -185,6 +197,7 @@ def rescan() -> RescanResult:
             for name in sorted(before)
             if name in after and after[name].size != before[name].size
         ],
+        disks=[disk_view(d, ps) for d in nodes if d.type == "disk"],
     )
 
 
