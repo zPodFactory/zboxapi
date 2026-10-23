@@ -20,6 +20,8 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-23
+
 ### Added
 - `POST /disk/rescan` also answers `disks`, every disk as `GET /disk` lists them, so a caller
   finds the disk it just added by serial (the vSphere disk UUID, with `disk.EnableUUID` on the
