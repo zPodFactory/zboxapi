@@ -20,6 +20,15 @@ same rules, and CI runs it on every push. Preview a note with `python3 tools/rel
 
 ## [Unreleased]
 
+### Added
+- `POST /disk/rescan` also answers `disks`, every disk as `GET /disk` lists them, so a caller
+  finds the disk it just added by serial (the vSphere disk UUID) in the same call.
+
+### Changed
+- `POST /disk/rescan` documents what `new` is: the disks this call's scan attached. On PVSCSI
+  the guest attaches a hot-added disk by itself, so `new` is usually empty (seen live on zcore
+  13.7); match by `serial` in `disks` instead of relying on it.
+
 ## [0.2.0] — 2026-10-10
 
 ### Added

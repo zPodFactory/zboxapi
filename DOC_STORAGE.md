@@ -95,17 +95,35 @@ Sizes are bytes everywhere in this API (`*_bytes`); the presentation layer forma
 ### 3. Rescan
 **POST** `/disk/rescan`
 
-Scans the SCSI hosts for disks attached since boot, then re-reads the size of every disk from
-the hypervisor. Both are reads; nothing on any disk changes.
+Scans the SCSI hosts for disks the kernel has not attached yet, re-reads the size of every disk
+from the hypervisor, then answers with the inventory as it stands. Nothing on any disk changes.
+
+- `new`: the disks this call's scan attached. On PVSCSI (zcore) the guest kernel attaches a
+  hot-added disk by itself, before any rescan, so `new` is usually empty: it is a safety net,
+  not the way to find a disk.
+- `resized`: the disks whose size changed. A disk grown in vSphere keeps its old size in the
+  guest until this re-read, so call it after every grow, before `POST /storage/{name}/grow`.
+- `disks`: every disk, exactly as `GET /disk` lists them. Find the disk you added by its
+  `serial`, which is the vSphere disk UUID (`VirtualDisk.backing.uuid` without dashes,
+  lowercase) when the VM has `disk.EnableUUID = TRUE`, as zcore 13.7 and later do. The name
+  (`sdc`) is not a stable handle: it shifts after a reboot when a disk before it was removed.
 
 ```json
 {
-  "new": ["sdc"],
+  "new": [],
   "resized": [
     {"disk": "sdd", "before_bytes": 2199023255552, "after_bytes": 4398046511104, "storage": "STORAGE03"}
+  ],
+  "disks": [
+    {"name": "sdc", "path": "/dev/sdc", "size_bytes": 536870912000, "model": "Virtual disk",
+     "serial": "6000c29d785c0aa83952b4c9fe7b8d43", "pttype": null, "state": "blank",
+     "reason": "sdc has no partition table and no filesystem signature", "partitions": [],
+     "storage": null}
   ]
 }
 ```
+
+(`disks` shortened to the new disk here; the real answer lists every disk.)
 
 ### 4. Detach a disk
 **POST** `/disk/{name}/detach`
